@@ -9,3 +9,5 @@ CLAUDE.md
 **/cdk.context.json
 .env
 __pycache__
+_antora-staging/
+_generated/
