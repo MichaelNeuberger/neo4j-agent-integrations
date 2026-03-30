@@ -95,7 +95,9 @@ def _make_inline(folder: str, path_xref: dict):
         url_no_frag = url_clean.split('#')[0]
 
         # Resolve relative path to repo-root-relative
-        repo_rel = str((Path(folder) / url_no_frag).resolve().relative_to(
+        # Anchor to REPO_ROOT (not CWD) so this works regardless of where the
+        # script is invoked from (e.g. docs-refresh CI checkout directory).
+        repo_rel = str((REPO_ROOT / folder / url_no_frag).resolve().relative_to(
             REPO_ROOT.resolve()
         )) if not url_no_frag.startswith('/') else url_no_frag.lstrip('/')
 
