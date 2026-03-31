@@ -233,6 +233,19 @@ def convert_md_to_adoc(md_text, entry, folder='', path_xref=None):
             i += 1
             continue
 
+        # ── Inline HTML (iframes etc.) — wrap in passthrough block ──────────
+        if re.match(r'^\s*<[a-zA-Z]', line) and not re.match(r'^\s*<!--', line):
+            if in_table:
+                flush_table()
+            out.append('++++')
+            out.append(line)
+            i += 1
+            while i < len(lines) and lines[i].strip():
+                out.append(lines[i])
+                i += 1
+            out.append('++++')
+            continue
+
         # ── Horizontal rules ─────────────────────────────────────────────
         if re.match(r'^\s*(---+|___+|\*\*\*+)\s*$', line):
             out.append("'''")
