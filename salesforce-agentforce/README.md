@@ -110,7 +110,7 @@ Write Apex classes with `@InvocableMethod` annotations. These become agent actio
     }
 ```
 
-The complete, deployable, and tested Apex code is in the `examples/apex` folder. Once the Apex classes are deployed, the code is available to be referenced as an action in Salesforce Flow.
+The complete, deployable, and tested Apex code is in the [`examples/track-c/apex`](https://github.com/neo4j-labs/neo4j-agent-integrations/tree/main/salesforce-agentforce/examples/track-c/apex) folder. Once the Apex classes are deployed, the code is available to be referenced as an action in Salesforce Flow.
 
 ### Advanced UI and Graph Visualization (LWC)
 
@@ -128,17 +128,17 @@ const rawData = await getInsights([{ recordId: this.recordId }]);
 this.processNeo4jData(rawData);
  ```
 
-A starter implementation of a Neo4j Graph Widget can be found in the `examples/lwc/neo4jGraphWidget` directory.
+A starter implementation of a Neo4j Graph Widget can be found in the `examples/lwc/neo4jGraphWidget` directory (coming soon).
 
 ### Code Examples
 
-See the `examples/` directory:
+See the [`examples/`](https://github.com/neo4j-labs/neo4j-agent-integrations/tree/main/salesforce-agentforce/examples) directory:
 
 | File | Description |
 | --- | --- |
-| `examples/track-c/agent.yaml` | YAML script defining the agent |
-| `examples/apex/*` | Apex files with tests |
-| `examples/track-b/neo4j-bridge/index.ts` | A sample Neo4j bridge server |
+| [`examples/agent.yaml`](https://github.com/neo4j-labs/neo4j-agent-integrations/blob/main/salesforce-agentforce/examples/agent.yaml) | YAML script defining the agent |
+| [`examples/track-c/apex/`](https://github.com/neo4j-labs/neo4j-agent-integrations/tree/main/salesforce-agentforce/examples/track-c/apex) | Apex files with tests |
+| [`examples/track-b/neo4j-bridge/index.ts`](https://github.com/neo4j-labs/neo4j-agent-integrations/blob/main/salesforce-agentforce/examples/track-b/neo4j-bridge/index.ts) | A sample Neo4j bridge server |
 
 ---
 

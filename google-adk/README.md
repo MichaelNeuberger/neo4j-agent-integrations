@@ -16,7 +16,7 @@ Follow the [Neo4j MCP documentation](https://neo4j.com/docs/mcp/current/) for se
 
 | Notebook | Description |
 |----------|-------------|
-| [google_adk.ipynb](./google_adk.ipynb) | Walkthrough of using Google ADK with Neo4j MCP: agent setup, Cypher query execution, and schema access |
+| [google_adk.ipynb](https://github.com/neo4j-labs/neo4j-agent-integrations/blob/main/google-adk/google_adk.ipynb) | Walkthrough of using Google ADK with Neo4j MCP: agent setup, Cypher query execution, and schema access |
 
 ## Key Features
 

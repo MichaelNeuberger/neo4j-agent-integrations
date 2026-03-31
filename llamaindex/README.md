@@ -23,8 +23,8 @@ pip install llama-index-core llama-index-tools-mcp llama-index-vector-stores-neo
 
 | Notebook | Description |
 |----------|-------------|
-| [llamaindex_functionagent.ipynb](./llamaindex_functionagent.ipynb) | Building a company research agent using LlamaIndex with Neo4j MCP server, custom tools, vector search, and FunctionAgent workflow |
-| [build_knowledge_graph_with_neo4j_llamacloud.ipynb](./build_knowledge_graph_with_neo4j_llamacloud.ipynb) | End-to-end pipeline for legal document processing using LlamaClassify, LlamaExtract, and Neo4j knowledge graph construction |
+| [llamaindex_functionagent.ipynb](https://github.com/neo4j-labs/neo4j-agent-integrations/blob/main/llamaindex/llamaindex_functionagent.ipynb) | Building a company research agent using LlamaIndex with Neo4j MCP server, custom tools, vector search, and FunctionAgent workflow |
+| [build_knowledge_graph_with_neo4j_llamacloud.ipynb](https://github.com/neo4j-labs/neo4j-agent-integrations/blob/main/llamaindex/build_knowledge_graph_with_neo4j_llamacloud.ipynb) | End-to-end pipeline for legal document processing using LlamaClassify, LlamaExtract, and Neo4j knowledge graph construction |
 
 ## Extension Points
 

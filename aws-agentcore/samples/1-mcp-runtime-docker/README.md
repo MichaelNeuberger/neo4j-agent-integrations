@@ -55,7 +55,7 @@ deployed via CDK as an AgentCore Runtime.
 
 ### Docker Build Mechanism
 
-The sample uses a local [docker/Dockerfile](docker/Dockerfile) that configures the Neo4j MCP server for HTTP transport and deploys it via CDK ECR Assets:
+The sample uses a local [docker/Dockerfile](https://github.com/neo4j-labs/neo4j-agent-integrations/blob/main/aws-agentcore/samples/1-mcp-runtime-docker/docker/Dockerfile) that configures the Neo4j MCP server for HTTP transport and deploys it via CDK ECR Assets:
 
 ```dockerfile
 FROM mcp/neo4j:latest
@@ -112,7 +112,7 @@ For tools available see the [official Neo4j MCP server documentation](https://gi
 
 The CDK deployment creates:
 
-- **ECR Image Asset** — Docker image built from [docker/Dockerfile](docker/Dockerfile) and pushed to ECR
+- **ECR Image Asset** — Docker image built from [docker/Dockerfile](https://github.com/neo4j-labs/neo4j-agent-integrations/blob/main/aws-agentcore/samples/1-mcp-runtime-docker/docker/Dockerfile) and pushed to ECR
 - **IAM Role** for AgentCore Runtime with Bedrock, ECR, CloudWatch Logs, X-Ray, and workload identity permissions
 - **AgentCore `CfnRuntime`** — configured with MCP protocol, public network mode, IAM auth, and the custom header allowlist
 
@@ -155,7 +155,7 @@ pip install -r requirements.txt
 
 ### Step 3: Configure Environment
 
-Neo4j uri and databse are supplied via CDK context. Default values are provided in [cdk.json](cdk.json):
+Neo4j uri and databse are supplied via CDK context. Default values are provided in [cdk.json](https://github.com/neo4j-labs/neo4j-agent-integrations/blob/main/aws-agentcore/samples/1-mcp-runtime-docker/cdk.json):
 
 ```json
 {

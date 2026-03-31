@@ -105,7 +105,7 @@ For the full tool reference, see the [official Neo4j MCP server documentation](h
 
 ### Step 1: Configure
 
-Edit the configuration variables at the top of [deploy.sh](deploy.sh):
+Edit the configuration variables at the top of [deploy.sh](https://github.com/neo4j-labs/neo4j-agent-integrations/blob/main/aws-agentcore-marketplace/deploy.sh):
 
 ```bash
 REGION="us-east-1"

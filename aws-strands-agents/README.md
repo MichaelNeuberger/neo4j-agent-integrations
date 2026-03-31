@@ -54,7 +54,7 @@ AgentCore Runtime (Strands Agent)
 
 ### Authentication Flow
 
-The MCP client ([strands_agent/mcp_client/client.py](strands_agent/mcp_client/client.py)) implements an OAuth 2.0 `client_credentials` flow with token caching:
+The MCP client ([strands_agent/mcp_client/client.py](https://github.com/neo4j-labs/neo4j-agent-integrations/blob/main/aws-strands-agents/strands_agent/mcp_client/client.py)) implements an OAuth 2.0 `client_credentials` flow with token caching:
 
 ```
 Agent invocation
@@ -87,7 +87,7 @@ The agent is deployed as **Python source code** bundled to S3 (no container imag
 
 ### Agent Entrypoint
 
-The handler in [strands_agent/main.py](strands_agent/main.py) uses `BedrockAgentCoreApp`:
+The handler in [strands_agent/main.py](https://github.com/neo4j-labs/neo4j-agent-integrations/blob/main/aws-strands-agents/strands_agent/main.py) uses `BedrockAgentCoreApp`:
 
 - **`@app.entrypoint`** — Async handler receiving `payload` and `context`
 - **Session ID** — From `context.session_id`, fallback to uuid
