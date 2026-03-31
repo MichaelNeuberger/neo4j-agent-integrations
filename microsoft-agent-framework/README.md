@@ -90,7 +90,7 @@ provider = Neo4jContextProvider(
 
 The `index_type` parameter determines which retriever the provider uses internally. Set it to `"fulltext"` for keyword-based BM25 matching or `"vector"` for semantic similarity search. The `retrieval_query` runs after the initial search, traversing from matched nodes through the graph to pull in related context.
 
-[Context Provider Architecture Details](https://github.com/neo4j-partners/neo4j-maf-provider/blob/main/temp/NEO4J_PROVIDER_ARCHITECTURE.md)
+[Context Provider Architecture Details](https://github.com/neo4j-labs/neo4j-maf-provider)
 
 #### Demo: Aircraft Maintenance and Flight Operations
 
@@ -100,7 +100,7 @@ The provider runs a fulltext search against the maintenance index using the user
 
 The flight delays agent works similarly. Questions about delay patterns trigger searches against flight data, with graph traversal expanding from delay nodes through flights to airports and routes. The LLM receives a connected view of the data without the agent ever making an explicit tool call.
 
-**Source:** [Neo4j Context Provider with Flight Demo](https://github.com/neo4j-partners/neo4j-maf-provider)
+**Source:** [Neo4j Context Provider with Flight Demo](https://github.com/neo4j-labs/neo4j-maf-provider)
 
 ---
 
@@ -130,12 +130,12 @@ Each pattern assumes you already have a graph worth querying. The agent integrat
 
 ### Open Source Integrations
 - [Neo4j + Microsoft Agent Framework (ma3u)](https://github.com/ma3u/neo4j-agentframework)
-- [Neo4j Context Provider](https://github.com/neo4j-partners/neo4j-maf-provider)
+- [Neo4j Context Provider](https://github.com/neo4j-labs/neo4j-maf-provider)
 
 ### Community Demos
 - [Graph Database Detective](https://github.com/joslat/neo4j-agent-framework-exploration) — crime investigation with POLE dataset
 - [GraphRAG Contract Agents](https://iloveagents.ai/agent-framework-graphrag-neo4j) — contract compliance analysis
-- [Aircraft Maintenance & Flight Delays](https://github.com/neo4j-partners/neo4j-maf-provider) — context provider demo
+- [Aircraft Maintenance & Flight Delays](https://github.com/neo4j-labs/neo4j-maf-provider) — context provider demo
 
 ### Documentation
 - [Microsoft Agent Framework](https://github.com/microsoft/agent-framework)
