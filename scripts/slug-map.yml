@@ -185,7 +185,6 @@ integrations:
     nav_label: n8n
     thin: true
 
-  # ── GenAI Libraries ───────────────────────────────────────────────────────
   - folder: haystack
     slug: haystack-agents
     title: "Haystack + Neo4j Integration"
@@ -200,7 +199,7 @@ integrations:
     title: "LlamaIndex + Neo4j Integration"
     tags: "llamaindex, rag, agents, neo4j, mcp, tools"
     product: LlamaIndex
-    category: "GenAI Libraries"
+    category: "Agent Frameworks"
     nav_label: LlamaIndex
     thin: false
 
@@ -209,6 +208,6 @@ integrations:
     title: "LangChain + Neo4j Integration"
     tags: "langchain, agents, neo4j, mcp, tools, graphrag"
     product: LangChain
-    category: "GenAI Libraries"
+    category: "Agent Frameworks"
     nav_label: LangChain
     thin: false
