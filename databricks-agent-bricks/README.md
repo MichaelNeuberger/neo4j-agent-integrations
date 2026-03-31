@@ -84,7 +84,6 @@ driver = GraphDatabase.driver(
 - On-Behalf-Of-User (OBO) authentication
 - Automatic authentication passthrough
 
-**Reference**: [mcp-auth-support.md](../mcp-auth-support.md#9-databricks-agent-bricks--mosaic-ai)
 
 ## Industry Research Agent Example
 
