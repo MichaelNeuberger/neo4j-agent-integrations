@@ -1794,23 +1794,29 @@ OPTIONAL MATCH (treat)-[u:USES]->(med:Medication)
 OPTIONAL MATCH (pat)-[tb:TREATED_BY]->(prov:Provider)
 RETURN pat, dx, diag, tr, treat, u, med, tb, prov"""),
 
-        ("GRAPH  Medication safety — contraindications + prescribers",
+        ("GRAPH  Medication safety × PSS — contraindications, who investigated them?",
          """MATCH (m1:Medication)-[ci:CONTRAINDICATED_WITH]->(m2:Medication)
 OPTIONAL MATCH (prov:Provider)-[rx:PRESCRIBED]->(m1)
-RETURN m1, ci, m2, prov, rx"""),
+OPTIONAL MATCH (s:AgentSession)-[inv:INVESTIGATED]->(m1)
+OPTIONAL MATCH (s)-[:CURRENT_PHASE]->(phase:Phase)
+RETURN m1, ci, m2, prov, rx, s, inv, phase"""),
 
-        ("GRAPH  Provider referral network — who refers to whom + facilities",
+        ("GRAPH  Provider referral × PSS — referrals + which agents investigated each provider",
          """MATCH (p1:Provider)-[ref:REFERRED_TO]->(p2:Provider)
 OPTIONAL MATCH (p1)-[a1:AFFILIATED_WITH]->(f1:Facility)
 OPTIONAL MATCH (p2)-[a2:AFFILIATED_WITH]->(f2:Facility)
-RETURN p1, ref, p2, a1, f1, a2, f2"""),
+OPTIONAL MATCH (s:AgentSession)-[inv:INVESTIGATED]->(p1)
+OPTIONAL MATCH (s)-[:MEMBER_OF]->(cluster:Cluster)
+RETURN p1, ref, p2, a1, f1, a2, f2, s, inv, cluster"""),
 
-        ("GRAPH  Patient journey — encounters → diagnoses → facilities → providers",
+        ("GRAPH  Patient journey × PSS — encounters + which agents tracked each step",
          """MATCH (pat:Patient)-[he:HAD_ENCOUNTER]->(enc:Encounter)
 OPTIONAL MATCH (enc)-[ri:RESULTED_IN]->(diag:Diagnosis)
 OPTIONAL MATCH (enc)-[oa:OCCURRED_AT]->(fac:Facility)
 OPTIONAL MATCH (prov:Provider)-[att:ATTENDED]->(enc)
-RETURN pat, he, enc, ri, diag, oa, fac, prov, att"""),
+OPTIONAL MATCH (s:AgentSession)-[inv:INVESTIGATED]->(pat)
+OPTIONAL MATCH (s)-[:CURRENT_STATE]->(st:SemanticState)-[tr:TRIGGERED]->(drift:DriftEvent)
+RETURN pat, he, enc, ri, diag, oa, fac, prov, att, s, inv, st, tr, drift"""),
 
         ("GRAPH  James Morrison — full clinical picture + agent investigations",
          """MATCH (pat:Patient {name: 'James Morrison'})
