@@ -199,10 +199,19 @@ def embed(text: str) -> list[float]:
     global _embedder
     if _embedder is None:
         try:
-            from sentence_transformers import SentenceTransformer
-            import torch
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            _embedder = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+            import warnings, logging, io, contextlib
+            warnings.filterwarnings("ignore")
+            os.environ["TOKENIZERS_PARALLELISM"] = "false"
+            os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+            os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+            for logger_name in ["sentence_transformers", "huggingface_hub", "transformers"]:
+                logging.getLogger(logger_name).setLevel(logging.ERROR)
+            # Suppress all stderr during import + model load
+            with contextlib.redirect_stderr(io.StringIO()):
+                from sentence_transformers import SentenceTransformer
+                import torch
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                _embedder = SentenceTransformer("all-MiniLM-L6-v2", device=device)
             print(f"  {DIM}Embedder: all-MiniLM-L6-v2 on {device}{RESET}")
         except ImportError:
             _embedder = "fallback"
@@ -1051,6 +1060,23 @@ def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
             return f"{YELLOW}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
         else:
             return f"{RED}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+
+    # Clean observer state from previous runs (observer is per-API-key, accumulates)
+    try:
+        summary = pss.get_observer_summary()
+        old_regions = summary.get("registered_regions", [])
+        if old_regions:
+            for old_rid in old_regions:
+                try:
+                    pss._delete(f"/observer/regions/{old_rid}")
+                except Exception:
+                    pass
+            print(f"  {DIM}Observer: unregistered {len(old_regions)} stale regions{RESET}")
+        cleared = pss.clear_anomalies()
+        if cleared.get("cleared", 0) > 0:
+            print(f"  {DIM}Observer: cleared {cleared['cleared']} old anomalies{RESET}")
+    except Exception:
+        pass  # observer may not exist yet
 
     cid_a = cid_b = rid = None
 
