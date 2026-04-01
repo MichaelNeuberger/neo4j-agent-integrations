@@ -1775,13 +1775,17 @@ OPTIONAL MATCH (s:AgentSession)-[:CURRENT_STATE]->(current:SemanticState)
 OPTIONAL MATCH path = (current)-[:STATE_HISTORY*0..20]->(st)
 RETURN s, st, t, d"""),
 
-        ("GRAPH  Agent × Patient — investigation trails through clinical graph",
+        ("GRAPH  Agent × Patient × Drift — PSS investigation + clinical graph + drift events",
          """MATCH (s:AgentSession)-[inv:INVESTIGATED]->(pat:Patient)
 MATCH (pat)-[dx:DIAGNOSED_WITH]->(diag:Diagnosis)
 OPTIONAL MATCH (pat)-[tb:TREATED_BY]->(prov:Provider)
 OPTIONAL MATCH (treat:Treatment)-[treats:TREATS]->(diag)
 OPTIONAL MATCH (treat)-[uses:USES]->(med:Medication)
-RETURN s, inv, pat, dx, diag, tb, prov, treats, treat, uses, med"""),
+OPTIONAL MATCH (s)-[:CURRENT_STATE]->(st:SemanticState)-[tr:TRIGGERED]->(drift:DriftEvent)
+OPTIONAL MATCH (s)-[:CURRENT_PHASE]->(phase:Phase)
+OPTIONAL MATCH (s)-[:MEMBER_OF]->(cluster:Cluster)
+RETURN s, inv, pat, dx, diag, tb, prov, treats, treat, uses, med,
+       st, tr, drift, phase, cluster"""),
 
         ("GRAPH  Clinical network — patients → diagnoses ← treatments → medications",
          """MATCH (pat:Patient)-[dx:DIAGNOSED_WITH]->(diag:Diagnosis)
