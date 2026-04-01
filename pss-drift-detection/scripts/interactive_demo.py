@@ -504,412 +504,950 @@ def scenario_topic_switch(mcp: PSSMCPServer, driver):
     mcp.end_pss_session(neo4j_sid)
 
 
-# ── Scenario 3: Multi-Agent Comparison ──────────────────────────────────
+# ── Scenario 3: Multi-Specialist Ward Round (PSS Layer 2 — Clusters) ─────
 
-def scenario_multi_agent(mcp: PSSMCPServer, driver):
-    header("Scenario 3: Multi-Agent Parallel Comparison")
-    print("  Three agents process messages simultaneously.")
-    print("  Each has different behavior — Neo4j lets us compare them.\n")
-
-    agents = {
-        "focused-agent": [
-            "Analyze Q3 revenue trends",
-            "Break down Q3 revenue by product line",
-            "Compare Q3 margins across regions",
-            "Q3 revenue forecast accuracy assessment",
-            "Q3 revenue risk factors analysis",
-        ],
-        "exploring-agent": [
-            "Analyze Q3 revenue trends",
-            "What about customer satisfaction scores?",
-            "How is employee retention this quarter?",
-            "Are there any supply chain disruptions?",
-            "What's the competitor landscape looking like?",
-        ],
-        "chaotic-agent": [
-            "Analyze Q3 revenue trends",
-            "Can you write me a poem about summer?",
-            "What's the weather in Tokyo right now?",
-            "How do neural networks learn features?",
-            "Best pizza recipe for a party of 20?",
-        ],
-    }
-
-    sessions = {}
-    for agent_id in agents:
-        s = mcp.create_pss_session(agent_id=agent_id)
-        sessions[agent_id] = s["session_id"]
-
-    agent_roles = {
-        "focused-agent": "a financial analyst specializing in quarterly revenue",
-        "exploring-agent": "a business strategy consultant",
-        "chaotic-agent": "a general-purpose assistant",
-    }
-
-    # Process all messages
-    results = {a: [] for a in agents}
-    max_steps = max(len(msgs) for msgs in agents.values())
-
-    for step in range(max_steps):
-        for agent_id, msgs in agents.items():
-            if step < len(msgs):
-                r = mcp.detect_drift(sessions[agent_id], msgs[step])
-                response = generate_response(
-                    msgs[step],
-                    agent_role=agent_roles[agent_id],
-                    pss_context=r.get("context", ""),
-                )
-                mcp.store_response(sessions[agent_id], response)
-                results[agent_id].append(r)
-                if USE_LLM:
-                    print(f"  {DIM}[{agent_id}]{RESET} {textwrap.shorten(response, 70)}")
-
-    # Comparison table
-    subheader("Per-Step Drift Comparison")
-    print(f"  {'Step':>4}  ", end="")
-    for a in agents:
-        print(f"{a:>18}  ", end="")
-    print()
-    print(f"  {'─'*4}  " + "  ".join("─" * 18 for _ in agents))
-
-    for step in range(max_steps):
-        print(f"  {step:>4}  ", end="")
-        for agent_id in agents:
-            if step < len(results[agent_id]):
-                r = results[agent_id][step]
-                d = r["drift_score"]
-                det = "*" if r.get("drift_detected") else " "
-                print(f"{color_drift(d):>28}{det} ", end="")
-            else:
-                print(f"{'—':>18}  ", end="")
-        print()
-    print(f"\n  {DIM}* = drift detected (topic switch){RESET}")
-
-    # Final state comparison from Neo4j
-    subheader("Final Agent States (from Neo4j)")
-    print(f"  {'Agent':>18}  {'Phase':>14}  {'Steps':>5}  {'Drift Events':>12}  {'Stability':>10}")
-    print(f"  {'─'*18}  {'─'*14}  {'─'*5}  {'─'*12}  {'─'*10}")
-
-    state_store = Neo4jStateStore(driver, database=NEO4J_DATABASE)
-    trajectory_analyzer = TrajectoryAnalyzer(state_store)
-
-    for agent_id in agents:
-        sid = sessions[agent_id]
-        phase = mcp.get_phase(sid)
-        events = mcp.query_drift_history(sid)
-        stability = trajectory_analyzer.compute_stability(sid)
-        traj = mcp.get_state_trajectory(sid, steps=50)
-
-        phase_str = color_phase(phase.get("phase", "N/A"))
-        print(f"  {agent_id:>18}  {phase_str:>24}  {len(traj):>5}  {len(events):>12}  {stability:>10.3f}")
-
-    # Influence analysis
-    subheader("Influence Analysis (Neo4j PageRank-like)")
-    influence = InfluenceAnalyzer(driver, database=NEO4J_DATABASE)
-    scores = influence.compute_influence_scores(list(sessions.values()))
-    for sid, score in sorted(scores, key=lambda x: -x[1]):
-        agent_name = [a for a, s in sessions.items() if s == sid][0]
-        bar_str = bar(score * len(scores), width=25)
-        print(f"  {agent_name:>18}  {score:.3f}  {bar_str}")
-
-    for agent_id in agents:
-        mcp.end_pss_session(sessions[agent_id])
-
-
-# ── Scenario 4: Memory & Recall ─────────────────────────────────────────
-
-def scenario_memory(mcp: PSSMCPServer, driver):
-    header("Scenario 4: Memory & Recall System")
-    print("  Shows PSS's multi-tier memory with Neo4j vector search.\n")
-
-    session = mcp.create_pss_session(agent_id="memory-demo")
-    sid = session["session_id"]
-
-    # Store memories across tiers with embeddings
-    memories = [
-        ("Patient John Smith has penicillin allergy — confirmed anaphylaxis risk", 0.95, "short"),
-        ("Heart failure protocol updated: first-line is now sacubitril/valsartan", 0.85, "short"),
-        ("Lab reference range for BNP changed to 0-100 pg/mL per 2024 guidelines", 0.80, "short"),
-        ("Dr. Garcia specializes in interventional cardiology, available MWF", 0.70, "medium"),
-        ("Facility B has highest cardiac surgery volume in the network", 0.65, "medium"),
-        ("Insurance pre-auth required for CT angiography — typical wait 2-3 days", 0.60, "medium"),
-        ("Hospital accreditation review scheduled for next quarter", 0.40, "long"),
-        ("Annual training on infection control completed last month", 0.30, "long"),
-    ]
-
-    subheader("Storing Memories")
-    for text, importance, tier in memories:
-        vec = _pseudo_embed(text)
-        result = mcp.store_memory(sid, text, importance=importance, vector=vec, tier=tier)
-        tier_color = {"short": YELLOW, "medium": CYAN, "long": DIM}[tier]
-        print(f"  {tier_color}[{tier:>6}]{RESET}  imp={importance:.2f}  {textwrap.shorten(text, 60)}")
-
-    # Query by similarity
-    subheader("Similarity Search: 'cardiac patient medication allergy'")
-    query_vec = _pseudo_embed("cardiac patient medication allergy")
-    results = mcp.memory_query(sid, query_vec, limit=5)
-    for i, r in enumerate(results):
-        print(f"  {i+1}. {CYAN}sim={r['similarity']:.3f}{RESET}  [{r['tier']}]  {textwrap.shorten(r['text'], 55)}")
-
-    subheader("Similarity Search: 'hospital operations and scheduling'")
-    query_vec2 = _pseudo_embed("hospital operations and scheduling")
-    results2 = mcp.memory_query(sid, query_vec2, limit=5)
-    for i, r in enumerate(results2):
-        print(f"  {i+1}. {CYAN}sim={r['similarity']:.3f}{RESET}  [{r['tier']}]  {textwrap.shorten(r['text'], 55)}")
-
-    # Consolidation
-    subheader("Memory Consolidation")
-    consol = mcp.memory_consolidate(sid)
-    print(f"  Consolidated: {consol['consolidated']} memories promoted")
-    print(f"  Short: {consol['short']}  |  Medium: {consol['medium']}  |  Long: {consol['long']}")
-
-    # Neo4j view
-    subheader("Neo4j Memory Graph")
-    with driver.session(database=NEO4J_DATABASE) as db:
-        result = db.run("""
-            MATCH (s:AgentSession {session_id: $sid})-[:HAS_MEMORY]->(m:Memory)
-            RETURN m.tier AS tier, count(m) AS count,
-                   avg(m.importance) AS avg_importance,
-                   collect(m.text_summary)[0..2] AS samples
-            ORDER BY tier
-        """, sid=sid)
-        for r in result:
-            print(f"  {r['tier']:>8}  count={r['count']}  avg_imp={r['avg_importance']:.2f}  "
-                  f"samples={r['samples']}")
-
-    mcp.end_pss_session(sid)
-
-
-# ── Scenario 5: Cross-Session Analytics ──────────────────────────────────
-
-def scenario_analytics(mcp: PSSMCPServer, driver):
-    header("Scenario 5: Cross-Session Analytics")
-    print("  Uses Neo4j graph algorithms across all existing sessions.\n")
-
-    # Get all active sessions from Neo4j
-    with driver.session(database=NEO4J_DATABASE) as db:
-        result = db.run("""
-            MATCH (s:AgentSession)
-            WHERE s.status IN ['active', 'closed']
-            OPTIONAL MATCH (s)-[:CURRENT_STATE]->(st:SemanticState)
-            OPTIONAL MATCH (s)-[:CURRENT_PHASE]->(p:Phase)
-            RETURN s.session_id AS sid, s.agent_id AS agent,
-                   s.status AS status, st.step AS steps, p.name AS phase
-            ORDER BY s.agent_id
-        """)
-        sessions = [dict(r) for r in result]
-
-    if not sessions:
-        print(f"  {RED}No sessions found in Neo4j. Run the seed script first.{RESET}")
-        return
-
-    subheader(f"Found {len(sessions)} Sessions in Neo4j")
-    for s in sessions:
-        print(f"  {s['agent']:>25}  phase={color_phase(s.get('phase', 'N/A') or 'N/A'):>24}  "
-              f"steps={s.get('steps', 0) or 0}  status={s['status']}")
-
-    # Influence Analysis
-    subheader("Influence Scores (PageRank-like, pure Cypher)")
-    influence = InfluenceAnalyzer(driver, database=NEO4J_DATABASE)
-    sids = [s["sid"] for s in sessions]
-    scores = influence.compute_influence_scores(sids)
-    for sid, score in sorted(scores, key=lambda x: -x[1]):
-        agent = next((s["agent"] for s in sessions if s["sid"] == sid), sid[:12])
-        bar_str = bar(score * len(scores), width=30)
-        print(f"  {agent:>25}  {score:.4f}  {bar_str}")
-
-    # Trajectory Stability
-    subheader("Trajectory Stability (from Neo4j state chains)")
-    state_store = Neo4jStateStore(driver, database=NEO4J_DATABASE)
-    trajectory_analyzer = TrajectoryAnalyzer(state_store)
-    stabilities = []
-    for s in sessions:
-        stability = trajectory_analyzer.compute_stability(s["sid"])
-        stabilities.append((s["agent"], stability))
-    for agent, stab in sorted(stabilities, key=lambda x: -x[1]):
-        color = GREEN if stab > 0.7 else (YELLOW if stab > 0.4 else RED)
-        print(f"  {agent:>25}  {color}{stab:.3f}{RESET}  {bar(stab)}")
-
-    # Drift Points Detection
-    subheader("Drift Points Detected (cosine drops > 0.3)")
-    for s in sessions:
-        points = trajectory_analyzer.find_drift_points(s["sid"], threshold=0.3)
-        if points:
-            for p in points:
-                print(f"  {s['agent']:>25}  step={p['step']}  "
-                      f"cosine={p['cosine_similarity']:.3f}  drop={p['drop']:.3f}")
-
-    # Phase Transition Matrix
-    subheader("Phase Transition Matrix (Neo4j Markov)")
-    with driver.session(database=NEO4J_DATABASE) as db:
-        result = db.run("""
-            MATCH (p1:Phase)-[:TRANSITIONED_TO]->(p2:Phase)
-            RETURN p1.name AS from_phase, p2.name AS to_phase, count(*) AS count
-            ORDER BY count DESC
-        """)
-        transitions = list(result)
-    if transitions:
-        print(f"  {'From':>15}  →  {'To':>15}  {'Count':>5}")
-        print(f"  {'─'*15}     {'─'*15}  {'─'*5}")
-        for t in transitions:
-            print(f"  {t['from_phase']:>15}  →  {t['to_phase']:>15}  {t['count']:>5}")
-    else:
-        print(f"  {DIM}No phase transitions recorded{RESET}")
-
-    # Node/Relationship counts
-    subheader("Neo4j Database Stats")
-    with driver.session(database=NEO4J_DATABASE) as db:
-        result = db.run("""
-            MATCH (n)
-            RETURN labels(n)[0] AS type, count(n) AS count
-            ORDER BY count DESC
-        """)
-        for r in result:
-            print(f"  {r['type']:>20}  {r['count']:>5} nodes")
-
-        result = db.run("""
-            MATCH ()-[r]->()
-            RETURN type(r) AS type, count(r) AS count
-            ORDER BY count DESC
-        """)
-        print()
-        for r in result:
-            print(f"  {r['type']:>20}  {r['count']:>5} relationships")
-
-
-# ── Scenario 6: Cluster Coupling & Knowledge Transfer (Layer 2) ─────────
-
-def scenario_transfer(mcp: PSSMCPServer, driver):
-    header("Scenario 6: Cluster Coupling & Knowledge Transfer (Layer 2)")
-    print("  Expert seeds a shared cluster. Novice joins and gets HITs from")
-    print("  the expert's cached knowledge — no LLM call needed.\n")
+def scenario_ward_round(mcp: PSSMCPServer, driver):
+    header("Scenario 3: Multi-Specialist Ward Round (PSS Layer 2 — Clusters)")
+    print("  Three specialists examine David Park (Essential Hypertension + COPD).")
+    print("  They share a PSS cluster so findings propagate between agents.")
+    print(f"  {GREEN}Dr. Chen{RESET} (internist) seeds baseline findings.")
+    print(f"  {CYAN}Dr. Volkov{RESET} (pulmonologist) queries — gets HITs from Chen's work.")
+    print(f"  {MAGENTA}Dr. Tanaka{RESET} (cardiologist) adds ECG finding — Volkov re-queries.\n")
 
     pss = PSSClient()
 
-    # Step 1: Create shared cluster
-    subheader("Step 1: Create shared research cluster")
+    BAR_W = 20
+
+    def _sim_bar(sim: float) -> str:
+        filled = int(min(sim, 1.0) * BAR_W)
+        if sim > 0.4:
+            return f"{GREEN}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+        elif sim > 0.2:
+            return f"{YELLOW}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+        else:
+            return f"{RED}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+
+    # ── Step 1: Create cluster ──
+    subheader("Step 1: Create PSS cluster 'park-ward-round'")
     try:
-        cluster = pss.create_cluster("cardiology-team", aggregation_mode="weighted_average", coupling_factor=0.25)
+        cluster = pss.create_cluster(
+            name="park-ward-round",
+            aggregation_mode="weighted_average",
+            coupling_factor=0.25,
+        )
         cid = cluster["cluster_id"]
-        info("Cluster ID", cid)
-        info("Coupling", "0.25 (moderate knowledge sharing)")
+        info("Cluster ID", cid[:20] + "...")
+        info("Coupling factor", "0.25")
     except Exception as e:
         print(f"  {RED}Cluster creation failed: {e}{RESET}")
         return
 
-    # Step 2: Expert seeds the cluster with cardiology Q&A
-    # Expert also creates a personal PSS session (needed for coupling feedback)
-    subheader("Step 2: Expert seeds the cluster with cardiology knowledge")
-    expert_pss_sid = None
-    expert_msgs = [
-        ("What are the first-line treatments for heart failure with reduced ejection fraction?",
-         "a senior cardiologist"),
-        ("How do beta-blockers compare to ACE inhibitors after myocardial infarction?",
-         "a senior cardiologist"),
-        ("What anticoagulation strategy works best for atrial fibrillation patients?",
-         "a senior cardiologist"),
-        ("What are the current guidelines for cardiac biomarker interpretation in ACS?",
-         "a senior cardiologist"),
+    # ── Step 2: Dr. Chen seeds baseline (threshold=0.99 → always MISS) ──
+    subheader("Step 2: Dr. Chen seeds baseline — 4 Q&A pairs about David Park")
+    info("Role", "Dr. Sarah Chen — internist performing baseline workup for David Park")
+    print()
+
+    chen_role = "an internist performing baseline workup for David Park"
+    chen_queries = [
+        "David Park presents with Essential Hypertension — current BP readings and medication?",
+        "Park also has Chronic Obstructive Pulmonary Disease — what is his FEV1 and current inhaler regimen?",
+        "Are there contraindications between Lisinopril for hypertension and his COPD medications?",
+        "What is Park's encounter history — when was his last Annual Physical Exam?",
+    ]
+    chen_entity_refs = [
+        [("Patient", "David Park"), ("Diagnosis", "Essential Hypertension"), ("Medication", "Lisinopril 10mg")],
+        [("Diagnosis", "Chronic Obstructive Pulmonary Disease"), ("Patient", "David Park")],
+        [("Medication", "Lisinopril 10mg"), ("Diagnosis", "Chronic Obstructive Pulmonary Disease")],
+        [("Patient", "David Park"), ("Encounter", "Annual Physical Exam")],
     ]
 
-    HIT_THRESHOLD = 0.52  # tuned: Q+A embeddings land ~0.55-0.80 for paraphrases
-
-    for msg, role in expert_msgs:
-        # Run against cluster (threshold=0.99 → always MISS during seeding)
+    chen_sid = None
+    for i, msg in enumerate(chen_queries):
         cdata = pss.cluster_run(cid, msg, short_circuit_threshold=0.99)
-        response = generate_response(msg, agent_role=role, pss_context=cdata.get("context", ""))
-        # Store Q+A in cluster
+        response = generate_response(msg, agent_role=chen_role, pss_context=cdata.get("context", ""))
         pss.cluster_store(cid, msg, response)
-        # Also run on expert's personal session (for coupling later)
-        expert_data = pss.run(msg, session_id=expert_pss_sid)
-        expert_pss_sid = expert_data["session_id"]
-        sim = cdata.get("top_similarity", 0.0)
-        print(f"  {RED}MISS{RESET}  sim={sim:.3f}  → LLM called")
-        print(f"    Q: {textwrap.shorten(msg, 65)}")
-        if USE_LLM:
-            print(f"    A: {textwrap.shorten(response, 70)}")
-        print()
-
-    # Register expert as cluster member
-    pss.add_cluster_member(cid, expert_pss_sid)
-    info("Expert session", f"{expert_pss_sid[:16]}... added to cluster")
-
-    # Step 3: Novice creates personal session, asks paraphrased questions
-    subheader("Step 3: Novice asks — paraphrases should HIT from cluster cache")
-    novice_pss_sid = None
-    novice_queries = [
-        ("Which drugs are recommended first for HFrEF patients?",
-         "Paraphrase of expert Q1"),
-        ("After a heart attack, should we use beta-blockers or ACE inhibitors?",
-         "Paraphrase of expert Q2"),
-        ("What is the best approach to anticoagulation in afib?",
-         "Paraphrase of expert Q3"),
-        ("How should we interpret troponin levels in acute coronary syndrome?",
-         "Paraphrase of expert Q4"),
-        ("What is the best recipe for chocolate chip cookies?",
-         "Novel — completely off-domain"),
-    ]
-
-    hits = 0
-    total = len(novice_queries)
-    for msg, label in novice_queries:
-        cdata = pss.cluster_run(cid, msg, short_circuit_threshold=HIT_THRESHOLD)
+        chen_data = pss.run(msg, session_id=chen_sid, short_circuit_threshold=0.99)
+        chen_sid = chen_data["session_id"]
         sim = cdata.get("top_similarity", 0.0)
         sc = cdata.get("short_circuit", False)
-        ctx = cdata.get("context", "")
+        print(f"  {RED}MISS{RESET}  {_sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score', 0.0):.3f}  {DIM}{textwrap.shorten(msg, 50)}{RESET}")
+        if USE_LLM:
+            print(f"        {DIM}A: {textwrap.shorten(response, 68)}{RESET}")
+        # INVESTIGATED: Chen → healthcare entities
+        for entity_label, entity_name in chen_entity_refs[i]:
+            with driver.session(database=NEO4J_DATABASE) as db:
+                db.run(f"""
+                    MATCH (s:AgentSession {{session_id: $sid}})
+                    MATCH (e:{entity_label} {{name: $name}})
+                    MERGE (s)-[:INVESTIGATED {{step: $step, phase: 'chen-baseline',
+                           drift_score: $drift}}]->(e)
+                """, sid=chen_sid, name=entity_name, step=i,
+                drift=cdata.get("drift_score", 0.0)).consume()
 
-        # Also run on novice's personal session
-        novice_data = pss.run(msg, session_id=novice_pss_sid)
-        novice_pss_sid = novice_data["session_id"]
+    pss.add_cluster_member(cid, chen_sid)
+    info("\n  Chen session", f"{chen_sid[:16]}... added to cluster")
 
+    # ── Step 3: Dr. Volkov queries (threshold=0.52) ──
+    subheader("Step 3: Dr. Volkov queries (threshold=0.52 — expect HITs from Chen)")
+    info("Role", "Dr. Elena Volkov — pulmonologist reviewing David Park's respiratory status")
+    print()
+
+    volkov_role = "a pulmonologist reviewing David Park's respiratory status"
+    volkov_queries = [
+        "What is David Park's blood pressure status and antihypertensive medication?",
+        "Does Park have any pulmonary comorbidities affecting his treatment plan?",
+        "What interactions should we monitor between his cardiac and pulmonary medications?",
+    ]
+    volkov_entity_refs = [
+        [("Patient", "David Park"), ("Diagnosis", "Essential Hypertension")],
+        [("Diagnosis", "Chronic Obstructive Pulmonary Disease"), ("Patient", "David Park")],
+        [("Medication", "Lisinopril 10mg"), ("Diagnosis", "Chronic Obstructive Pulmonary Disease")],
+    ]
+
+    volkov_sid = None
+    volkov_hits = 0
+    for i, msg in enumerate(volkov_queries):
+        cdata = pss.cluster_run(cid, msg, short_circuit_threshold=0.52)
+        volkov_data = pss.run(msg, session_id=volkov_sid, short_circuit_threshold=0.99)
+        volkov_sid = volkov_data["session_id"]
+        sim = cdata.get("top_similarity", 0.0)
+        sc = cdata.get("short_circuit", False)
         if sc:
-            hits += 1
-            print(f"  {GREEN}HIT{RESET}   sim={sim:.3f}  → LLM skipped ({label})")
-            print(f"    Q: {textwrap.shorten(msg, 65)}")
+            volkov_hits += 1
+            print(f"  {GREEN}HIT{RESET}   {_sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score',0.0):.3f}  sc={sc}  {DIM}{textwrap.shorten(msg, 46)}{RESET}")
         else:
-            response = generate_response(msg, agent_role="a medical intern", pss_context=ctx)
-            pss.cluster_store(cid, msg, response)
-            print(f"  {RED}MISS{RESET}  sim={sim:.3f}  → LLM called  ({label})")
-            print(f"    Q: {textwrap.shorten(msg, 65)}")
+            response = generate_response(msg, agent_role=volkov_role, pss_context=cdata.get("context", ""))
+            print(f"  {RED}MISS{RESET}  {_sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score',0.0):.3f}  sc={sc}  {DIM}{textwrap.shorten(msg, 46)}{RESET}")
             if USE_LLM:
-                print(f"    A: {textwrap.shorten(response, 70)}")
-        print()
+                print(f"        {DIM}A: {textwrap.shorten(response, 68)}{RESET}")
+        for entity_label, entity_name in volkov_entity_refs[i]:
+            with driver.session(database=NEO4J_DATABASE) as db:
+                db.run(f"""
+                    MATCH (s:AgentSession {{session_id: $sid}})
+                    MATCH (e:{entity_label} {{name: $name}})
+                    MERGE (s)-[:INVESTIGATED {{step: $step, phase: 'volkov-queries',
+                           drift_score: $drift}}]->(e)
+                """, sid=volkov_sid, name=entity_name, step=i,
+                drift=cdata.get("drift_score", 0.0)).consume()
 
-    # Register novice as cluster member
-    pss.add_cluster_member(cid, novice_pss_sid)
-    info("Novice session", f"{novice_pss_sid[:16]}... added to cluster")
+    # ── Step 4: Dr. Tanaka — novel ECG finding ──
+    subheader("Step 4: Dr. Tanaka — queries + stores new ECG finding")
+    info("Role", "Dr. Yuki Tanaka — cardiologist evaluating David Park's cardiac function")
+    print()
 
-    # Step 4: Apply coupling feedback — blend cluster vector into both sessions
-    subheader("Step 4: Apply coupling feedback (G4)")
+    tanaka_role = "a cardiologist evaluating David Park's cardiac function"
+    tanaka_q1 = "What is the hypertension management plan for David Park?"
+    cdata_t1 = pss.cluster_run(cid, tanaka_q1, short_circuit_threshold=0.52)
+    sim_t1 = cdata_t1.get("top_similarity", 0.0)
+    sc_t1 = cdata_t1.get("short_circuit", False)
+    tanaka_data = pss.run(tanaka_q1, short_circuit_threshold=0.99)
+    tanaka_sid = tanaka_data["session_id"]
+
+    if sc_t1:
+        print(f"  {GREEN}HIT{RESET}   {_sim_bar(sim_t1)} sim={sim_t1:.3f}  drift={cdata_t1.get('drift_score',0.0):.3f}  (≈ Chen Q1)")
+    else:
+        resp_t1 = generate_response(tanaka_q1, agent_role=tanaka_role)
+        print(f"  {RED}MISS{RESET}  {_sim_bar(sim_t1)} sim={sim_t1:.3f}  drift={cdata_t1.get('drift_score',0.0):.3f}  (≈ Chen Q1)")
+
+    # Tanaka stores novel ECG finding
+    ecg_msg = "Park's latest ECG shows left ventricular hypertrophy — should we adjust treatment?"
+    ecg_resp = generate_response(ecg_msg, agent_role=tanaka_role)
+    pss.cluster_store(cid, ecg_msg, "LVH confirmed on ECG. Consider adding Amlodipine 5mg. Echo scheduled.")
+    info("\n  Tanaka ECG finding stored", "LVH + Amlodipine recommendation")
+    # INVESTIGATED: Tanaka → Park
+    with driver.session(database=NEO4J_DATABASE) as db:
+        db.run("""
+            MATCH (s:AgentSession {session_id: $sid})
+            MATCH (e:Patient {name: $name})
+            MERGE (s)-[:INVESTIGATED {step: 0, phase: 'tanaka-ecg', drift_score: $drift}]->(e)
+        """, sid=tanaka_sid, name="David Park",
+        drift=cdata_t1.get("drift_score", 0.0)).consume()
+
+    pss.add_cluster_member(cid, tanaka_sid)
+
+    # ── Step 5: Dr. Volkov re-queries after Tanaka's contribution ──
+    subheader("Step 5: Dr. Volkov re-queries — should HIT Tanaka's ECG finding")
+    print()
+    ecg_query = "Any new cardiac findings for David Park?"
+    cdata_v2 = pss.cluster_run(cid, ecg_query, short_circuit_threshold=0.52)
+    sim_v2 = cdata_v2.get("top_similarity", 0.0)
+    sc_v2 = cdata_v2.get("short_circuit", False)
+    drift_v2 = cdata_v2.get("drift_score", 0.0)
+    phase_v2 = cdata_v2.get("drift_phase", "stable")
+    if sc_v2:
+        print(f"  {GREEN}HIT{RESET}   {_sim_bar(sim_v2)} sim={sim_v2:.3f}  drift={drift_v2:.3f}  phase={phase_v2}  (Tanaka's ECG finding)")
+    else:
+        print(f"  {RED}MISS{RESET}  {_sim_bar(sim_v2)} sim={sim_v2:.3f}  drift={drift_v2:.3f}  phase={phase_v2}  (searching for ECG finding)")
+
+    # ── Step 6: Apply G4 coupling feedback ──
+    subheader("Step 6: Apply G4 coupling feedback")
     try:
         feedback = pss.cluster_feedback(cid)
         sessions_updated = feedback.get("sessions_updated", 0)
         info("Sessions coupled", str(sessions_updated))
-        if sessions_updated > 0:
-            info("Effect", f"Cluster vector blended into {sessions_updated} member sessions (α=0.25)")
-        else:
-            info("Effect", f"{DIM}No sessions with initialised vectors to couple{RESET}")
+        info("Coupling factor", "α=0.25 (cluster vector blended into member sessions)")
     except Exception as e:
         print(f"  {YELLOW}Feedback: {e}{RESET}")
 
-    # Summary
-    subheader("Cluster Efficiency Summary")
-    info("Total queries", str(total))
-    info("Cluster HITs", f"{hits}/{total}  ({100*hits//total}% LLM cost saved)")
-    info("LLM calls made", str(total - hits))
-    info("Members", f"expert ({expert_pss_sid[:12]}...) + novice ({novice_pss_sid[:12]}...)")
+    # ── Step 7: GET cluster state ──
+    subheader("Step 7: Cluster state summary")
+    try:
+        cs = pss.get_cluster(cid)
+        info("Member count", str(cs.get("member_count", cs.get("members", "N/A"))))
+        info("Interaction count", str(cs.get("interaction_count", "N/A")))
+        info("Aggregate vector dims", str(cs.get("aggregate_vector_dims", cs.get("dimension", "N/A"))))
+    except Exception as e:
+        print(f"  {DIM}Cluster state: {e}{RESET}")
 
-    # Persist summary to Neo4j
-    s = mcp.create_pss_session(agent_id="cluster-transfer-demo")
-    for msg, _ in novice_queries[:2]:
-        mcp.detect_drift(s["session_id"], msg)
-    mcp.end_pss_session(s["session_id"])
+    # ── Persist cluster topology to Neo4j ──
+    subheader("Neo4j — Cluster topology")
+    with driver.session(database=NEO4J_DATABASE) as db:
+        # Create Cluster node
+        db.run("""
+            MERGE (c:Cluster {cluster_id: $cid})
+            SET c.name = 'park-ward-round', c.coupling_factor = 0.25,
+                c.scenario = 'ward-round'
+        """, cid=cid).consume()
+        # MEMBER_OF relationships
+        for sid, role in [(chen_sid, "internist"), (volkov_sid, "pulmonologist"), (tanaka_sid, "cardiologist")]:
+            if sid:
+                db.run("""
+                    MATCH (s:AgentSession {session_id: $sid})
+                    MATCH (c:Cluster {cluster_id: $cid})
+                    MERGE (s)-[:MEMBER_OF {role: $role}]->(c)
+                """, sid=sid, cid=cid, role=role).consume()
 
-    # Cleanup
+    # ── Summary ──
+    subheader("Ward Round Summary")
+    info("Patient", "David Park — Essential Hypertension + COPD")
+    info("Cluster", f"{cid[:20]}...")
+    info("Dr. Chen HITs", "0/4 (seeding phase — always MISS)")
+    info("Dr. Volkov HITs", f"{volkov_hits}/3 (from Chen's baseline)")
+    info("Dr. Tanaka", "1 novel ECG finding stored")
+    info("Volkov post-Tanaka", f"{'HIT' if sc_v2 else 'MISS'} (sim={sim_v2:.3f})")
+    info("Neo4j", "INVESTIGATED + MEMBER_OF relationships created")
+
+    # Cleanup PSS cluster
     try:
         pss.delete_cluster(cid)
+        info("Cleanup", "Cluster deleted from PSS")
     except Exception:
         pass
+
+    # End Neo4j sessions
+    for sid in [chen_sid, volkov_sid, tanaka_sid]:
+        if sid:
+            try:
+                mcp.end_pss_session(sid)
+            except Exception:
+                pass
+
+
+# ── Scenario 4: Medication Safety Guard (PSS Layer 1b) ───────────────────
+
+def scenario_medication_safety(mcp: PSSMCPServer, driver):
+    header("Scenario 4: Medication Safety Guard (PSS Layer 1b — Anchors, Triggers, Isolation, Memory)")
+    print("  An agent monitors Carlos Gutierrez starting Chemotherapy Cycle 1.")
+    print("  Safety guardrails are set up using PSS Layer 1b features:")
+    print(f"    {GREEN}Drift Anchor{RESET}  locks session to oncology domain")
+    print(f"    {YELLOW}Resonance Trigger{RESET}  'CRITICAL' / 'contraindication' keywords → high importance")
+    print(f"    {CYAN}Synthetic Memory{RESET}  injects known drug interactions from Neo4j graph")
+    print(f"    {RED}Input Isolation{RESET}   quarantines off-topic inputs\n")
+
+    pss = PSSClient()
+    BAR_W = 20
+
+    def _sim_bar(sim: float) -> str:
+        filled = int(min(sim, 1.0) * BAR_W)
+        if sim > 0.4:
+            return f"{GREEN}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+        elif sim > 0.2:
+            return f"{YELLOW}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+        else:
+            return f"{RED}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+
+    # ── Step 1: Create session ──
+    subheader("Step 1: Create PSS session with enable_topic_switch")
+    try:
+        sess = pss.create_session(enable_topic_switch=True)
+        sid = sess["session_id"]
+        info("Session ID", sid[:20] + "...")
+        info("Layer", "1b — session control enabled")
+    except Exception as e:
+        # Fallback: use /run to create session
+        print(f"  {YELLOW}create_session: {e} — falling back to /run{RESET}")
+        sess = pss.run(
+            "Carlos Gutierrez oncology pharmacist session init",
+            short_circuit_threshold=0.99,
+        )
+        sid = sess["session_id"]
+        info("Session ID", sid[:20] + "... (fallback)")
+
+    # Also mirror to Neo4j
+    neo4j_sess = mcp.create_pss_session(agent_id="oncology-safety-guard")
+    neo4j_sid = neo4j_sess["session_id"]
+
+    # ── Step 2: Add drift anchor (oncology domain) ──
+    subheader("Step 2: Set drift anchor — oncology domain")
+    anchor_text = "oncology chemotherapy cancer treatment cytotoxic drugs Carlos Gutierrez"
+    oncology_embedding = _pseudo_embed(anchor_text)
+    try:
+        result = pss.add_anchor(sid, oncology_embedding)
+        info("Anchor set", "oncology domain (384-dim embedding)")
+    except Exception as e:
+        print(f"  {YELLOW}anchor endpoint: {e}{RESET}")
+
+    # ── Step 3: Add resonance triggers ──
+    subheader("Step 3: Add resonance triggers")
+    for keyword in ["CRITICAL", "contraindication"]:
+        try:
+            pss.add_trigger(sid, keyword)
+            info(f"Trigger '{keyword}'", "added — will flag high-importance turns")
+        except Exception as e:
+            print(f"  {YELLOW}trigger '{keyword}': {e}{RESET}")
+
+    # ── Step 4: Inject synthetic memories from Neo4j contraindication graph ──
+    subheader("Step 4: Inject synthetic memories (contraindications from Neo4j)")
+    contraindication_memories = [
+        ("Amoxicillin 250mg is contraindicated with Metformin 500mg",
+         [("Medication", "Amoxicillin 250mg"), ("Medication", "Metformin 500mg")]),
+        ("Atorvastatin 40mg is contraindicated with Sertraline 50mg",
+         [("Medication", "Atorvastatin 40mg"), ("Medication", "Sertraline 50mg")]),
+        ("Carlos Gutierrez Chemotherapy Cycle 1 uses Atorvastatin 40mg and Metformin 500mg",
+         [("Patient", "Carlos Gutierrez"), ("Treatment", "Chemotherapy Cycle 1"),
+          ("Medication", "Atorvastatin 40mg"), ("Medication", "Metformin 500mg")]),
+    ]
+    for mem_text, entity_refs in contraindication_memories:
+        embedding = _pseudo_embed(mem_text)
+        try:
+            pss.inject_memory(sid, embedding=embedding, text=mem_text,
+                              tier="short_term", importance=1.0)
+            info("Memory injected", textwrap.shorten(mem_text, 60))
+        except Exception as e:
+            print(f"  {YELLOW}memory inject: {e}{RESET}")
+        # Persist to Neo4j: INVESTIGATED from safety session → referenced entities
+        for entity_label, entity_name in entity_refs:
+            with driver.session(database=NEO4J_DATABASE) as db:
+                db.run(f"""
+                    MATCH (s:AgentSession {{session_id: $sid}})
+                    MATCH (e:{entity_label} {{name: $name}})
+                    MERGE (s)-[:INVESTIGATED {{phase: 'memory-injection',
+                           step: 0, drift_score: 0.0}}]->(e)
+                """, sid=neo4j_sid, name=entity_name).consume()
+
+    # ── Step 5: Set isolation to QUARANTINE ──
+    subheader("Step 5: Set input isolation to QUARANTINE")
+    try:
+        pss.set_isolation(sid, level="QUARANTINE", similarity_threshold=0.5)
+        info("Isolation level", f"{RED}QUARANTINE{RESET} (similarity_threshold=0.50)")
+        info("Effect", "Off-topic inputs will be filtered")
+    except Exception as e:
+        print(f"  {YELLOW}isolation endpoint: {e}{RESET}")
+
+    # ── Step 6: Run oncology queries ──
+    subheader("Step 6: Oncology queries — should process normally")
+    info("Agent role", "an oncology pharmacist monitoring Carlos Gutierrez's chemotherapy safety")
+    print()
+
+    agent_role = "an oncology pharmacist monitoring Carlos Gutierrez's chemotherapy safety"
+    oncology_queries = [
+        ("Carlos Gutierrez is starting Chemotherapy Cycle 1 — what pre-treatment labs are required?",
+         [("Patient", "Carlos Gutierrez"), ("Treatment", "Chemotherapy Cycle 1")]),
+        ("What antiemetic protocol for his cisplatin-based regimen?",
+         [("Treatment", "Chemotherapy Cycle 1")]),
+        ("CRITICAL: Monitor for neutropenic fever — what ANC thresholds for dose delay?",
+         [("Patient", "Carlos Gutierrez"), ("Treatment", "Chemotherapy Cycle 1")]),
+        ("Does Chemotherapy Cycle 1 use Atorvastatin 40mg — any interactions?",
+         [("Medication", "Atorvastatin 40mg"), ("Treatment", "Chemotherapy Cycle 1")]),
+        ("What is the contraindication profile between chemo drugs and his existing medications?",
+         [("Medication", "Metformin 500mg"), ("Medication", "Atorvastatin 40mg")]),
+    ]
+
+    prev_resp = None
+    for i, (msg, entity_refs) in enumerate(oncology_queries):
+        result = pss.run(msg, session_id=sid, response=prev_resp,
+                         short_circuit_threshold=0.75)
+        sim = result["top_similarity"]
+        drift_score = result["drift_score"]
+        drift_phase = result.get("drift_phase", "stable")
+        sc = result.get("short_circuit", False)
+
+        # Mirror to Neo4j
+        mcp_result = mcp.detect_drift(neo4j_sid, msg)
+        response = generate_response(msg, agent_role=agent_role,
+                                     pss_context=result.get("context", ""))
+        mcp.store_response(neo4j_sid, response)
+        prev_resp = response
+
+        phase_c = {
+            "stable": GREEN, "shifting": YELLOW, "drifted": RED,
+        }.get(drift_phase, DIM)
+
+        crit_flag = f"  {RED}{BOLD}TRIGGER{RESET}" if "CRITICAL" in msg else ""
+        print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
+              f"{phase_c}{drift_phase:>8}{RESET}{crit_flag}")
+        print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
+        if USE_LLM:
+            print(f"      {DIM}A: {textwrap.shorten(response, 66)}{RESET}")
+        print()
+
+        # INVESTIGATED relationships
+        for entity_label, entity_name in entity_refs:
+            with driver.session(database=NEO4J_DATABASE) as db:
+                db.run(f"""
+                    MATCH (s:AgentSession {{session_id: $sid}})
+                    MATCH (e:{entity_label} {{name: $name}})
+                    MERGE (s)-[:INVESTIGATED {{step: $step, phase: 'oncology',
+                           drift_score: $drift}}]->(e)
+                """, sid=neo4j_sid, name=entity_name, step=i,
+                drift=drift_score).consume()
+
+    # ── Step 7: Off-topic queries → should be quarantined ──
+    subheader("Step 7: Off-topic queries — should be quarantined/filtered")
+    print()
+    off_topic = [
+        "When is the next Pharmacy and Therapeutics Committee meeting?",
+        "What is the bed count at Cedar Grove Clinic?",
+    ]
+    for i, msg in enumerate(off_topic):
+        result = pss.run(msg, session_id=sid, response=prev_resp,
+                         short_circuit_threshold=0.75)
+        sim = result["top_similarity"]
+        drift_score = result["drift_score"]
+        drift_phase = result.get("drift_phase", "stable")
+        phase_c = {
+            "stable": GREEN, "shifting": YELLOW, "drifted": RED,
+        }.get(drift_phase, DIM)
+        quarantine_flag = f"  {RED}OFF-TOPIC{RESET}" if sim < 0.25 else ""
+        print(f"  {5+i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
+              f"{phase_c}{drift_phase:>8}{RESET}{quarantine_flag}")
+        print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
+        print()
+
+    # ── Step 8: Get anchor score ──
+    subheader("Step 8: Anchor score — how far has session drifted from oncology?")
+    try:
+        anchor_score = pss.get_anchor_score(sid)
+        info("Anchor score", str(anchor_score))
+    except Exception as e:
+        print(f"  {YELLOW}anchor_score: {e}{RESET}")
+
+    # ── Summary ──
+    subheader("Safety Guard Summary")
+    info("Patient", "Carlos Gutierrez — Chemotherapy Cycle 1")
+    info("Session", sid[:20] + "...")
+    info("Contraindications injected", "3 synthetic memories")
+    info("Oncology queries", f"{len(oncology_queries)} processed")
+    info("Off-topic queries", f"{len(off_topic)} (quarantined if sim < 0.25)")
+    info("Neo4j", "INVESTIGATED relationships to Gutierrez + Chemo + Medications")
+
+    mcp.end_pss_session(neo4j_sid)
+
+
+# ── Scenario 5: Hospital Network Consensus (PSS Layers 3+4) ──────────────
+
+def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
+    header("Scenario 5: Hospital Network Consensus (PSS Layers 3+4 — Regions, Observer)")
+    print("  Two department clusters across two facilities:")
+    print(f"    {GREEN}Cluster A{RESET}  'cardiology-memorial' at Memorial General  → Maria Rodriguez (AMI)")
+    print(f"    {CYAN}Cluster B{RESET}  'emergency-riverside' at Riverside Medical  → James Morrison (ER)")
+    print(f"  Both in Region 'hospital-network'. When cardiology drifts,")
+    print(f"  the Observer checks for cross-cluster anomalies.\n")
+
+    pss = PSSClient()
+    BAR_W = 20
+
+    def _sim_bar(sim: float) -> str:
+        filled = int(min(sim, 1.0) * BAR_W)
+        if sim > 0.4:
+            return f"{GREEN}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+        elif sim > 0.2:
+            return f"{YELLOW}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+        else:
+            return f"{RED}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+
+    cid_a = cid_b = rid = None
+
+    # ── Step 1: Create two clusters ──
+    subheader("Step 1: Create cardiology + emergency clusters")
+    try:
+        ca = pss.create_cluster(name="cardiology-memorial", aggregation_mode="weighted_average",
+                                coupling_factor=0.2)
+        cid_a = ca["cluster_id"]
+        info("Cluster A (cardiology)", cid_a[:20] + "...")
+    except Exception as e:
+        print(f"  {RED}cardiology cluster failed: {e}{RESET}")
+        return
+
+    try:
+        cb = pss.create_cluster(name="emergency-riverside", aggregation_mode="weighted_average",
+                                coupling_factor=0.2)
+        cid_b = cb["cluster_id"]
+        info("Cluster B (emergency)", cid_b[:20] + "...")
+    except Exception as e:
+        print(f"  {RED}emergency cluster failed: {e}{RESET}")
+        pss.delete_cluster(cid_a)
+        return
+
+    # ── Step 2: Seed clusters ──
+    subheader("Step 2: Seed clusters with domain Q&A pairs")
+
+    cardiology_seed = [
+        ("Maria Rodriguez Acute Myocardial Infarction — current troponin levels?",
+         "Troponin I peaked at 4.2 ng/mL at 6h post-admission.",
+         [("Patient", "Maria Rodriguez"), ("Diagnosis", "Acute Myocardial Infarction")]),
+        ("Post-MI antiplatelet therapy — aspirin plus clopidogrel or ticagrelor?",
+         "Dual antiplatelet: Aspirin 81mg + Ticagrelor 90mg BID per AHA 2023.",
+         [("Diagnosis", "Acute Myocardial Infarction")]),
+        ("Dr. O'Brien referred Rodriguez to Dr. Okonkwo — for cardiac rehab?",
+         "Yes — referral to Dr. Okonkwo for outpatient cardiac rehabilitation.",
+         [("Provider", "Dr. Michael O'Brien"), ("Provider", "Dr. Rachel Okonkwo")]),
+        ("Rodriguez ER encounter — which interventions were performed?",
+         "Emergency PCI with drug-eluting stent to LAD. Aspirin + heparin loading.",
+         [("Encounter", "Emergency Room Visit"), ("Patient", "Maria Rodriguez")]),
+    ]
+    emergency_seed = [
+        ("James Morrison Emergency Room Visit — chief complaint and triage priority?",
+         "Chief complaint: chest pain 7/10. Triage ESI-2 (emergent).",
+         [("Patient", "James Morrison"), ("Encounter", "Emergency Room Visit")]),
+        ("Morrison has Type 2 Diabetes and COPD — medication reconciliation needed?",
+         "Hold Metformin pre-procedure, review inhalers for COPD.",
+         [("Diagnosis", "Type 2 Diabetes Mellitus"), ("Diagnosis", "Chronic Obstructive Pulmonary Disease"),
+          ("Medication", "Metformin 500mg")]),
+        ("Dr. Volkov attending Morrison's ER encounter — any cardiac biomarker results?",
+         "Troponin negative x2, BNP 210 pg/mL — non-ischemic.",
+         [("Provider", "Dr. Elena Volkov"), ("Patient", "James Morrison")]),
+        ("Morrison's chest pain workup — should we consult cardiology?",
+         "Yes — cardiology consultation requested given new LBBB on ECG.",
+         [("Patient", "James Morrison"), ("Encounter", "Emergency Room Visit")]),
+    ]
+
+    info("Cardiology", f"seeding {len(cardiology_seed)} Q&A pairs")
+    cardio_sess_id = None
+    for msg, resp, _ in cardiology_seed:
+        pss.cluster_store(cid_a, msg, resp)
+        r = pss.run(msg, session_id=cardio_sess_id, short_circuit_threshold=0.99)
+        cardio_sess_id = r["session_id"]
+
+    info("Emergency", f"seeding {len(emergency_seed)} Q&A pairs")
+    emerg_sess_id = None
+    for msg, resp, _ in emergency_seed:
+        pss.cluster_store(cid_b, msg, resp)
+        r = pss.run(msg, session_id=emerg_sess_id, short_circuit_threshold=0.99)
+        emerg_sess_id = r["session_id"]
+
+    # Register sessions as cluster members
+    if cardio_sess_id:
+        pss.add_cluster_member(cid_a, cardio_sess_id)
+    if emerg_sess_id:
+        pss.add_cluster_member(cid_b, emerg_sess_id)
+
+    # ── Step 3: Create Region + add clusters ──
+    subheader("Step 3: Create Region 'hospital-network' (consensus_threshold=0.5)")
+    try:
+        region = pss.create_region(name="hospital-network", consensus_threshold=0.5,
+                                   vote_window_seconds=60.0)
+        rid = region["region_id"]
+        info("Region ID", rid[:20] + "...")
+        pss.add_region_cluster(rid, cid_a)
+        info("Added", "cardiology-memorial to region")
+        pss.add_region_cluster(rid, cid_b)
+        info("Added", "emergency-riverside to region")
+    except Exception as e:
+        print(f"  {YELLOW}Region: {e}{RESET}")
+
+    # ── Step 4: Create Observer ──
+    subheader("Step 4: Create Global Observer")
+    try:
+        observer = pss.create_observer(
+            sample_interval_seconds=30.0,
+            region_ids=[rid] if rid else [],
+        )
+        info("Observer", "created and registered to hospital-network region")
+    except Exception as e:
+        print(f"  {YELLOW}Observer: {e}{RESET}")
+
+    # ── Step 5: Run cluster queries ──
+    subheader("Step 5: Cardiology cluster — on-topic queries + drift pivot")
+    info("Role", "a cardiologist at Memorial General Hospital treating Maria Rodriguez")
+    print()
+
+    cardio_role = "a cardiologist at Memorial General Hospital treating Maria Rodriguez"
+    neo4j_cardio = mcp.create_pss_session(agent_id="cardio-memorial")
+    neo4j_cardio_sid = neo4j_cardio["session_id"]
+
+    cardio_run_msgs = [
+        ("Maria Rodriguez post-MI — troponin trend over 24h?",
+         [("Patient", "Maria Rodriguez"), ("Diagnosis", "Acute Myocardial Infarction")]),
+        ("Post-MI antiplatelet: is Ticagrelor preferred over Clopidogrel for Rodriguez?",
+         [("Diagnosis", "Acute Myocardial Infarction")]),
+        ("Dr. Okonkwo's cardiac rehab plan for Rodriguez — when to start?",
+         [("Provider", "Dr. Rachel Okonkwo"), ("Patient", "Maria Rodriguez")]),
+        ("Rodriguez ER intervention — stent type and anti-thrombotic protocol?",
+         [("Encounter", "Emergency Room Visit"), ("Patient", "Maria Rodriguez")]),
+        # PIVOT — drift-inducing
+        ("What is the latest infection control audit status at Memorial General?",
+         [("Facility", "Memorial General Hospital")]),
+    ]
+    for i, (msg, entity_refs) in enumerate(cardio_run_msgs):
+        cdata = pss.cluster_run(cid_a, msg, short_circuit_threshold=0.60)
+        mcp_result = mcp.detect_drift(neo4j_cardio_sid, msg)
+        response = generate_response(msg, agent_role=cardio_role,
+                                     pss_context=cdata.get("context", ""))
+        mcp.store_response(neo4j_cardio_sid, response)
+        sim = cdata.get("top_similarity", 0.0)
+        sc = cdata.get("short_circuit", False)
+        drift_score = cdata.get("drift_score", 0.0)
+        drift_phase = cdata.get("drift_phase", "stable")
+        phase_c = {"stable": GREEN, "shifting": YELLOW, "drifted": RED}.get(drift_phase, DIM)
+        drift_flag = f"  {RED}{BOLD}DRIFT{RESET}" if mcp_result.get("drift_detected") else ""
+        hit_flag = f"  {GREEN}HIT{RESET}" if sc else ""
+        print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
+              f"{phase_c}{drift_phase:>8}{RESET}{hit_flag}{drift_flag}")
+        print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
+        if USE_LLM:
+            print(f"      {DIM}A: {textwrap.shorten(response, 66)}{RESET}")
+        print()
+        for entity_label, entity_name in entity_refs:
+            with driver.session(database=NEO4J_DATABASE) as db:
+                db.run(f"""
+                    MATCH (s:AgentSession {{session_id: $sid}})
+                    MATCH (e:{entity_label} {{name: $name}})
+                    MERGE (s)-[:INVESTIGATED {{step: $step, phase: 'cardio',
+                           drift_score: $drift}}]->(e)
+                """, sid=neo4j_cardio_sid, name=entity_name, step=i,
+                drift=drift_score).consume()
+
+    subheader("Step 5b: Emergency cluster — on-topic queries")
+    info("Role", "an emergency physician at Riverside Medical Center treating James Morrison")
+    print()
+
+    emerg_role = "an emergency physician at Riverside Medical Center treating James Morrison"
+    neo4j_emerg = mcp.create_pss_session(agent_id="emerg-riverside")
+    neo4j_emerg_sid = neo4j_emerg["session_id"]
+
+    emerg_run_msgs = [
+        ("James Morrison ER chief complaint — triage classification?",
+         [("Patient", "James Morrison"), ("Encounter", "Emergency Room Visit")]),
+        ("Morrison diabetes medication reconciliation — Metformin hold indication?",
+         [("Diagnosis", "Type 2 Diabetes Mellitus"), ("Medication", "Metformin 500mg")]),
+        ("Dr. Volkov managing Morrison — cardiac biomarkers at 2h and 6h?",
+         [("Provider", "Dr. Elena Volkov"), ("Patient", "James Morrison")]),
+        ("Should Morrison have cardiology consult given LBBB?",
+         [("Patient", "James Morrison"), ("Encounter", "Emergency Room Visit")]),
+    ]
+    for i, (msg, entity_refs) in enumerate(emerg_run_msgs):
+        cdata = pss.cluster_run(cid_b, msg, short_circuit_threshold=0.60)
+        mcp_result = mcp.detect_drift(neo4j_emerg_sid, msg)
+        response = generate_response(msg, agent_role=emerg_role,
+                                     pss_context=cdata.get("context", ""))
+        mcp.store_response(neo4j_emerg_sid, response)
+        sim = cdata.get("top_similarity", 0.0)
+        sc = cdata.get("short_circuit", False)
+        drift_score = cdata.get("drift_score", 0.0)
+        drift_phase = cdata.get("drift_phase", "stable")
+        phase_c = {"stable": GREEN, "shifting": YELLOW, "drifted": RED}.get(drift_phase, DIM)
+        hit_flag = f"  {GREEN}HIT{RESET}" if sc else ""
+        print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
+              f"{phase_c}{drift_phase:>8}{RESET}{hit_flag}")
+        print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
+        if USE_LLM:
+            print(f"      {DIM}A: {textwrap.shorten(response, 66)}{RESET}")
+        print()
+        for entity_label, entity_name in entity_refs:
+            with driver.session(database=NEO4J_DATABASE) as db:
+                db.run(f"""
+                    MATCH (s:AgentSession {{session_id: $sid}})
+                    MATCH (e:{entity_label} {{name: $name}})
+                    MERGE (s)-[:INVESTIGATED {{step: $step, phase: 'emergency',
+                           drift_score: $drift}}]->(e)
+                """, sid=neo4j_emerg_sid, name=entity_name, step=i,
+                drift=drift_score).consume()
+
+    # ── Step 6: Check region events + observer ──
+    subheader("Step 6: Region events + Observer sample")
+    if rid:
+        try:
+            events = pss.get_region_events(rid, limit=20)
+            info("Region events", f"{len(events)} events in hospital-network")
+            for ev in events[:3]:
+                print(f"    {DIM}{ev}{RESET}")
+        except Exception as e:
+            print(f"  {YELLOW}Region events: {e}{RESET}")
+
+    try:
+        sample = pss.observer_sample()
+        info("Observer sample", str(sample)[:80] + ("..." if len(str(sample)) > 80 else ""))
+    except Exception as e:
+        print(f"  {YELLOW}Observer sample: {e}{RESET}")
+
+    try:
+        anomalies = pss.get_anomalies(limit=20)
+        info("Observer anomalies", f"{len(anomalies)} cross-cluster anomalies detected")
+        for a in anomalies[:3]:
+            print(f"    {RED}{a}{RESET}")
+    except Exception as e:
+        print(f"  {YELLOW}Observer anomalies: {e}{RESET}")
+
+    try:
+        summary = pss.get_observer_summary()
+        info("Observer summary", str(summary)[:80] + ("..." if len(str(summary)) > 80 else ""))
+    except Exception as e:
+        print(f"  {YELLOW}Observer summary: {e}{RESET}")
+
+    # ── Neo4j: persist cluster/region topology ──
+    subheader("Neo4j — Region/Cluster topology")
+    with driver.session(database=NEO4J_DATABASE) as db:
+        # Region node
+        if rid:
+            db.run("""
+                MERGE (r:Region {region_id: $rid})
+                SET r.name = 'hospital-network', r.consensus_threshold = 0.5
+            """, rid=rid).consume()
+        # Cluster nodes + CONTAINS_CLUSTER
+        for cid, cname in [(cid_a, "cardiology-memorial"), (cid_b, "emergency-riverside")]:
+            db.run("""
+                MERGE (c:Cluster {cluster_id: $cid})
+                SET c.name = $name, c.scenario = 'consensus'
+            """, cid=cid, name=cname).consume()
+            if rid:
+                db.run("""
+                    MATCH (r:Region {region_id: $rid})
+                    MATCH (c:Cluster {cluster_id: $cid})
+                    MERGE (r)-[:CONTAINS_CLUSTER]->(c)
+                """, rid=rid, cid=cid).consume()
+        # MEMBER_OF
+        for sess_id, cid, fac_name in [
+            (neo4j_cardio_sid, cid_a, "Memorial General Hospital"),
+            (neo4j_emerg_sid, cid_b, "Riverside Medical Center"),
+        ]:
+            db.run("""
+                MATCH (s:AgentSession {session_id: $sid})
+                MATCH (c:Cluster {cluster_id: $cid})
+                MERGE (s)-[:MEMBER_OF {facility: $fac}]->(c)
+            """, sid=sess_id, cid=cid, fac=fac_name).consume()
+            # Link session to facility
+            db.run("""
+                MATCH (s:AgentSession {session_id: $sid})
+                MATCH (f:Facility {name: $fac})
+                MERGE (s)-[:INVESTIGATED {phase: 'cluster-facility', step: 0, drift_score: 0.0}]->(f)
+            """, sid=sess_id, fac=fac_name).consume()
+
+    # ── Summary ──
+    subheader("Hospital Network Consensus Summary")
+    info("Region", "hospital-network (consensus_threshold=0.5)")
+    info("Cluster A", f"cardiology-memorial — {len(cardiology_seed)} seeded, {len(cardio_run_msgs)} run")
+    info("Cluster B", f"emergency-riverside — {len(emergency_seed)} seeded, {len(emerg_run_msgs)} run")
+    info("Pivot query", f"Step 5 — infection control audit (drift trigger)")
+    info("Neo4j", "Region → CONTAINS_CLUSTER → Clusters → MEMBER_OF ← Sessions")
+
+    # Cleanup PSS
+    for cid in [cid_a, cid_b]:
+        try:
+            pss.delete_cluster(cid)
+        except Exception:
+            pass
+    if rid:
+        try:
+            pss.delete_region(rid)
+        except Exception:
+            pass
+
+    mcp.end_pss_session(neo4j_cardio_sid)
+    mcp.end_pss_session(neo4j_emerg_sid)
+
+
+# ── Scenario 6: Shift Handoff (PSS Layer 5 — Export/Import, Transfer) ───
+
+def scenario_shift_handoff(mcp: PSSMCPServer, driver):
+    header("Scenario 6: Shift Handoff (PSS Layer 5 — Export/Import, Network Transfer)")
+    print("  Night shift Dr. Volkov finishes Morrison's overnight monitoring.")
+    print("  She exports her PSS session state.")
+    print("  Day shift Dr. Tanaka imports it — continues with full context.")
+    print(f"  Compare: Tanaka's sim WITH vs WITHOUT import.\n")
+
+    pss = PSSClient()
+    BAR_W = 20
+
+    def _sim_bar(sim: float) -> str:
+        filled = int(min(sim, 1.0) * BAR_W)
+        if sim > 0.4:
+            return f"{GREEN}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+        elif sim > 0.2:
+            return f"{YELLOW}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+        else:
+            return f"{RED}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
+
+    # ── Step 1: Volkov night shift — build deep context ──
+    subheader("Step 1: Dr. Volkov night shift — 6 overnight queries about James Morrison")
+    info("Role", "Dr. Elena Volkov, night shift internist monitoring James Morrison overnight")
+    print()
+
+    volkov_role = "Dr. Elena Volkov, night shift internist monitoring James Morrison overnight"
+    night_queries = [
+        ("James Morrison overnight vitals — any concerning trends in blood glucose?",
+         [("Patient", "James Morrison"), ("Diagnosis", "Type 2 Diabetes Mellitus")]),
+        ("Morrison's Metformin was held for catheterization — when to resume?",
+         [("Medication", "Metformin 500mg"), ("Treatment", "Cardiac Catheterization")]),
+        ("Overnight troponin trend for Morrison — any elevation?",
+         [("Patient", "James Morrison"), ("Diagnosis", "Acute Myocardial Infarction")]),
+        ("Morrison's COPD — overnight SpO2 readings and oxygen requirements?",
+         [("Diagnosis", "Chronic Obstructive Pulmonary Disease"), ("Patient", "James Morrison")]),
+        ("Lab results from Morrison's midnight blood draw — CBC and CMP?",
+         [("Patient", "James Morrison"), ("Encounter", "Emergency Room Visit")]),
+        ("Morrison's morning insulin dose — calculate based on fasting glucose",
+         [("Patient", "James Morrison"), ("Medication", "Metformin 500mg")]),
+    ]
+
+    neo4j_volkov = mcp.create_pss_session(agent_id="volkov-night-shift")
+    neo4j_volkov_sid = neo4j_volkov["session_id"]
+    volkov_pss_sid = None
+
+    for i, (msg, entity_refs) in enumerate(night_queries):
+        result = pss.run(msg, session_id=volkov_pss_sid, short_circuit_threshold=0.99)
+        volkov_pss_sid = result["session_id"]
+        mcp_result = mcp.detect_drift(neo4j_volkov_sid, msg)
+        response = generate_response(msg, agent_role=volkov_role,
+                                     pss_context=result.get("context", ""))
+        mcp.store_response(neo4j_volkov_sid, response)
+        sim = result["top_similarity"]
+        drift_score = result["drift_score"]
+        drift_phase = result.get("drift_phase", "stable")
+        phase_c = {"stable": GREEN, "shifting": YELLOW, "drifted": RED}.get(drift_phase, DIM)
+        print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
+              f"{phase_c}{drift_phase:>8}{RESET}  {DIM}{textwrap.shorten(msg, 45)}{RESET}")
+        if USE_LLM:
+            print(f"      {DIM}A: {textwrap.shorten(response, 66)}{RESET}")
+        for entity_label, entity_name in entity_refs:
+            with driver.session(database=NEO4J_DATABASE) as db:
+                db.run(f"""
+                    MATCH (s:AgentSession {{session_id: $sid}})
+                    MATCH (e:{entity_label} {{name: $name}})
+                    MERGE (s)-[:INVESTIGATED {{step: $step, phase: 'volkov-night',
+                           drift_score: $drift}}]->(e)
+                """, sid=neo4j_volkov_sid, name=entity_name, step=i,
+                drift=drift_score).consume()
+
+    info("\n  Volkov PSS session", f"{volkov_pss_sid[:16]}... (6 overnight turns)")
+
+    # ── Step 2: Baseline — fresh Tanaka session (no context) ──
+    subheader("Step 2: Baseline — Tanaka without import (fresh session)")
+    tanaka_fresh = pss.run(
+        "What happened overnight with James Morrison — any changes in condition?",
+        short_circuit_threshold=0.65,
+    )
+    baseline_sim = tanaka_fresh["top_similarity"]
+    baseline_sc = tanaka_fresh.get("short_circuit", False)
+    print(f"  baseline (no import): {_sim_bar(baseline_sim)} sim={baseline_sim:.3f}  "
+          f"sc={baseline_sc}  drift={tanaka_fresh['drift_score']:.3f}")
+
+    # ── Step 3: Export Volkov's session ──
+    subheader("Step 3: Export Volkov's session state (SHA-256 checksum)")
+    volkov_state_dict = None
+    export_ok = False
+    try:
+        exported = pss.export_session(volkov_pss_sid)
+        volkov_state_dict = exported.get("state_dict", exported)
+        checksum = exported.get("checksum", "(no checksum field)")
+        info("Exported", "state_dict obtained")
+        info("Checksum", str(checksum)[:40] + ("..." if len(str(checksum)) > 40 else ""))
+        export_ok = True
+    except Exception as e:
+        print(f"  {YELLOW}export_session: {e} — will proceed without import{RESET}")
+
+    # ── Step 4: Tanaka imports Volkov's state ──
+    subheader("Step 4: Tanaka day shift — create session + import Volkov's state")
+    info("Role", "Dr. Yuki Tanaka, day shift internist taking over Morrison's care")
+
+    # Create Tanaka's session via /run
+    tanaka_init = pss.run(
+        "Dr. Tanaka day shift starting morning rounds for Morrison",
+        short_circuit_threshold=0.99,
+    )
+    tanaka_pss_sid = tanaka_init["session_id"]
+    neo4j_tanaka = mcp.create_pss_session(agent_id="tanaka-day-shift")
+    neo4j_tanaka_sid = neo4j_tanaka["session_id"]
+
+    imported = False
+    if export_ok and volkov_state_dict:
+        try:
+            import_result = pss.import_session(tanaka_pss_sid, volkov_state_dict)
+            info("Import", f"Volkov state restored into Tanaka's session")
+            imported = True
+        except Exception as e:
+            print(f"  {YELLOW}import_session: {e}{RESET}")
+
+    # ── Step 5: Network delta transfer (Layer 5) ──
+    subheader("Step 5: Network delta transfer (Layer 5 — may 404)")
+    try:
+        transfer = pss.transfer_delta(
+            source_session_id=volkov_pss_sid,
+            target_session_id=tanaka_pss_sid,
+            max_weight=0.15,
+        )
+        info("Transfer", f"delta applied (max_weight=0.15): {str(transfer)[:60]}")
+    except Exception as e:
+        print(f"  {YELLOW}network/transfer: {e}{RESET}")
+        info("Fallback", "Tanaka proceeds with import-only context")
+
+    # ── Step 6: Tanaka continues — 3 morning queries ──
+    subheader("Step 6: Tanaka day rounds — 3 queries (with Volkov's context)")
+    print()
+
+    tanaka_role = "Dr. Yuki Tanaka, day shift internist taking over Morrison's care"
+    day_queries = [
+        ("What happened overnight with James Morrison — any changes in condition?",
+         [("Patient", "James Morrison"), ("Encounter", "Emergency Room Visit")]),
+        ("Morrison's morning labs — should we restart Metformin today?",
+         [("Medication", "Metformin 500mg"), ("Patient", "James Morrison")]),
+        ("Plan for Morrison's discharge — medication reconciliation and follow-up schedule?",
+         [("Patient", "James Morrison"), ("Medication", "Metformin 500mg"),
+          ("Medication", "Lisinopril 10mg")]),
+    ]
+
+    for i, (msg, entity_refs) in enumerate(day_queries):
+        result = pss.run(msg, session_id=tanaka_pss_sid, short_circuit_threshold=0.65)
+        mcp_result = mcp.detect_drift(neo4j_tanaka_sid, msg)
+        response = generate_response(msg, agent_role=tanaka_role,
+                                     pss_context=result.get("context", ""))
+        mcp.store_response(neo4j_tanaka_sid, response)
+        sim = result["top_similarity"]
+        drift_score = result["drift_score"]
+        drift_phase = result.get("drift_phase", "stable")
+        sc = result.get("short_circuit", False)
+        phase_c = {"stable": GREEN, "shifting": YELLOW, "drifted": RED}.get(drift_phase, DIM)
+        context_flag = f"  {GREEN}HIT{RESET}" if sc else ""
+        improvement = ""
+        if i == 0:
+            delta = sim - baseline_sim
+            improvement = f"  {GREEN}+{delta:.3f} vs baseline{RESET}" if delta > 0 else f"  {YELLOW}{delta:.3f} vs baseline{RESET}"
+        print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
+              f"{phase_c}{drift_phase:>8}{RESET}{context_flag}{improvement}")
+        print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
+        if USE_LLM:
+            print(f"      {DIM}A: {textwrap.shorten(response, 66)}{RESET}")
+        print()
+        for entity_label, entity_name in entity_refs:
+            with driver.session(database=NEO4J_DATABASE) as db:
+                db.run(f"""
+                    MATCH (s:AgentSession {{session_id: $sid}})
+                    MATCH (e:{entity_label} {{name: $name}})
+                    MERGE (s)-[:INVESTIGATED {{step: $step, phase: 'tanaka-day',
+                           drift_score: $drift}}]->(e)
+                """, sid=neo4j_tanaka_sid, name=entity_name, step=i,
+                drift=drift_score).consume()
+
+    # ── Summary ──
+    subheader("Shift Handoff Summary")
+    info("Patient", "James Morrison — overnight monitoring → day rounds")
+    info("Dr. Volkov", f"6 overnight queries  (PSS: {volkov_pss_sid[:16]}...)")
+    info("Dr. Tanaka", f"3 day queries  (PSS: {tanaka_pss_sid[:16]}...)")
+    info("Export/Import", f"{'SUCCESS' if imported else 'SKIPPED (endpoint unavailable)'}")
+    info("Baseline sim", f"{baseline_sim:.3f} (fresh Tanaka session)")
+    info("Neo4j", "INVESTIGATED relationships: Volkov night + Tanaka day → Morrison")
+
+    mcp.end_pss_session(neo4j_volkov_sid)
+    mcp.end_pss_session(neo4j_tanaka_sid)
 
 
 
@@ -1295,10 +1833,10 @@ def main():
     scenarios = {
         "1": ("Live Drift Detection — type messages, watch drift in real-time", scenario_live_drift),
         "2": ("Drift + Short-Circuit — Morrison diabetes → Patel psychiatry → Rodriguez cardiology → paraphrase HITs", scenario_topic_switch),
-        "3": ("Multi-Agent Comparison — focused vs exploring vs chaotic agents", scenario_multi_agent),
-        "4": ("Memory & Recall — store, search, consolidate multi-tier memories", scenario_memory),
-        "5": ("Cross-Session Analytics — influence, stability, phase transitions", scenario_analytics),
-        "6": ("Cluster Coupling — expert seeds cluster, novice gets HITs (Layer 2)", scenario_transfer),
+        "3": ("Ward Round Cluster — Dr. Chen/Volkov/Tanaka on David Park (PSS Layer 2 Clusters)", scenario_ward_round),
+        "4": ("Medication Safety Guard — Gutierrez chemo, anchors/triggers/isolation (PSS Layer 1b)", scenario_medication_safety),
+        "5": ("Hospital Network Consensus — Rodriguez/Morrison, Region + Observer (PSS Layers 3+4)", scenario_hospital_consensus),
+        "6": ("Shift Handoff — Volkov night → Tanaka day, export/import/transfer (PSS Layer 5)", scenario_shift_handoff),
         "7": ("Neo4j Cypher Explorer — run queries directly against the graph", scenario_explorer),
     }
 
