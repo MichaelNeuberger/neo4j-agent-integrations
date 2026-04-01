@@ -181,12 +181,35 @@ def info(label: str, value: str):
     print(f"  {DIM}{label:>22}{RESET}  {value}")
 
 def _pseudo_embed(text: str, dim: int = 384) -> list[float]:
+    """Deterministic pseudo-embedding (fallback only)."""
     vec = [0.0] * dim
     for i, ch in enumerate(text.encode("utf-8")):
         idx = (ch * (i + 1)) % dim
         vec[idx] += math.sin(ch * 0.1 + i * 0.01)
     norm = math.sqrt(sum(v * v for v in vec))
     return [v / norm for v in vec] if norm > 0 else vec
+
+
+# Real embedding via sentence-transformers (GPU → CPU fallback)
+_embedder = None
+
+def embed(text: str) -> list[float]:
+    """Embed text using all-MiniLM-L6-v2 (GPU if available, else CPU).
+    Falls back to _pseudo_embed if sentence-transformers is not installed."""
+    global _embedder
+    if _embedder is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            _embedder = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+            print(f"  {DIM}Embedder: all-MiniLM-L6-v2 on {device}{RESET}")
+        except ImportError:
+            _embedder = "fallback"
+            print(f"  {YELLOW}sentence-transformers not installed — using pseudo-embeddings{RESET}")
+    if _embedder == "fallback":
+        return _pseudo_embed(text)
+    return _embedder.encode(text).tolist()
 
 
 # ── Scenario 1: Live Drift Detection ────────────────────────────────────
@@ -790,7 +813,7 @@ def scenario_medication_safety(mcp: PSSMCPServer, driver):
     # ── Step 2: Add drift anchor (oncology domain) ──
     subheader("Step 2: Set drift anchor — oncology domain")
     anchor_text = "oncology chemotherapy cancer treatment cytotoxic drugs Carlos Gutierrez"
-    oncology_embedding = _pseudo_embed(anchor_text)
+    oncology_embedding = embed(anchor_text)
     try:
         result = pss.add_anchor(sid, oncology_embedding)
         info("Anchor set", "oncology domain (384-dim embedding)")
@@ -818,7 +841,7 @@ def scenario_medication_safety(mcp: PSSMCPServer, driver):
           ("Medication", "Atorvastatin 40mg"), ("Medication", "Metformin 500mg")]),
     ]
     for mem_text, entity_refs in contraindication_memories:
-        embedding = _pseudo_embed(mem_text)
+        embedding = embed(mem_text)
         try:
             pss.inject_memory(sid, embedding=embedding, text=mem_text,
                               tier="short_term", importance=1.0)
@@ -1118,7 +1141,25 @@ def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
                 """, sid=neo4j_cardio_sid, name=entity_name, step=i,
                 drift=drift_score).consume()
 
-    subheader("Step 5b: Emergency cluster — on-topic queries")
+    # ── Observer sample #1: after cardiology drift ──
+    subheader("Step 5b: Observer sample after cardiology drift")
+    try:
+        sample1 = pss.observer_sample()
+        info("Sample #1", f"sampled at {sample1.get('sampled_at', 'N/A')}")
+    except Exception as e:
+        print(f"  {YELLOW}observer sample: {e}{RESET}")
+
+    try:
+        events1 = pss.get_region_events(rid, limit=10) if rid else []
+        info("Region events", f"{len(events1)} after cardiology drift")
+        for ev in events1:
+            print(f"    drift={ev.get('drift_score', 0):.2f}  phase={ev.get('drift_phase', '?')}  "
+                  f"cluster={str(ev.get('cluster_id', ''))[:16]}...")
+    except Exception as e:
+        print(f"  {YELLOW}region events: {e}{RESET}")
+
+    # ── Step 5c: Emergency cluster — on-topic + drift pivot ──
+    subheader("Step 5c: Emergency cluster — on-topic + drift pivot")
     info("Role", "an emergency physician at Riverside Medical Center treating James Morrison")
     print()
 
@@ -1135,6 +1176,9 @@ def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
          [("Provider", "Dr. Elena Volkov"), ("Patient", "James Morrison")]),
         ("Should Morrison have cardiology consult given LBBB?",
          [("Patient", "James Morrison"), ("Encounter", "Emergency Room Visit")]),
+        # PIVOT — same domain shift as cardiology (admin topic)
+        ("What is the current bed availability at Riverside Medical Center?",
+         [("Facility", "Riverside Medical Center")]),
     ]
     for i, (msg, entity_refs) in enumerate(emerg_run_msgs):
         cdata = pss.cluster_run(cid_b, msg, short_circuit_threshold=0.60)
@@ -1147,9 +1191,10 @@ def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
         drift_score = cdata.get("drift_score", 0.0)
         drift_phase = cdata.get("drift_phase", "stable")
         phase_c = {"stable": GREEN, "shifting": YELLOW, "drifted": RED}.get(drift_phase, DIM)
+        drift_flag = f"  {RED}{BOLD}DRIFT{RESET}" if cdata.get("drift_detected") else ""
         hit_flag = f"  {GREEN}HIT{RESET}" if sc else ""
         print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
-              f"{phase_c}{drift_phase:>8}{RESET}{hit_flag}")
+              f"{phase_c}{drift_phase:>8}{RESET}{hit_flag}{drift_flag}")
         print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
         if USE_LLM:
             print(f"      {DIM}A: {textwrap.shorten(response, 66)}{RESET}")
@@ -1164,34 +1209,67 @@ def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
                 """, sid=neo4j_emerg_sid, name=entity_name, step=i,
                 drift=drift_score).consume()
 
-    # ── Step 6: Check region events + observer ──
-    subheader("Step 6: Region events + Observer sample")
+    # ── Observer sample #2: after BOTH clusters drifted ──
+    subheader("Step 5d: Observer sample after both clusters drifted")
+    try:
+        sample2 = pss.observer_sample()
+        info("Sample #2", f"sampled at {sample2.get('sampled_at', 'N/A')}")
+    except Exception as e:
+        print(f"  {YELLOW}observer sample: {e}{RESET}")
+
+    # ── Step 6: Region events + Observer results ──
+    subheader("Step 6: Region Consensus + Observer Anomaly Detection (Layer 3+4)")
+
+    # Region events
+    region_event_count = 0
     if rid:
         try:
             events = pss.get_region_events(rid, limit=20)
-            info("Region events", f"{len(events)} events in hospital-network")
-            for ev in events[:3]:
-                print(f"    {DIM}{ev}{RESET}")
+            region_event_count = len(events)
+            info("Region events", f"{BOLD}{len(events)}{RESET} drift events in hospital-network")
+            for ev in events:
+                drift = ev.get("drift_score", 0)
+                phase = ev.get("drift_phase", "?")
+                cid_ev = str(ev.get("cluster_id", ""))[:16]
+                ts = ev.get("timestamp", "")
+                color = RED if phase == "drifted" else YELLOW
+                print(f"    {color}drift={drift:.2f}  phase={phase:>8}  cluster={cid_ev}...{RESET}")
+            if not events:
+                print(f"    {DIM}(Region consensus requires drift in multiple clusters within vote window){RESET}")
         except Exception as e:
             print(f"  {YELLOW}Region events: {e}{RESET}")
 
-    try:
-        sample = pss.observer_sample()
-        info("Observer sample", str(sample)[:80] + ("..." if len(str(sample)) > 80 else ""))
-    except Exception as e:
-        print(f"  {YELLOW}Observer sample: {e}{RESET}")
-
+    # Observer anomalies
+    print()
+    anomaly_count = 0
     try:
         anomalies = pss.get_anomalies(limit=20)
-        info("Observer anomalies", f"{len(anomalies)} cross-cluster anomalies detected")
-        for a in anomalies[:3]:
-            print(f"    {RED}{a}{RESET}")
+        anomaly_count = len(anomalies)
+        info("Observer anomalies", f"{BOLD}{len(anomalies)}{RESET} detected")
+        for a in anomalies:
+            atype = a.get("anomaly_type", "unknown")
+            sev = a.get("severity", 0)
+            desc = a.get("description", "")
+            affected = a.get("affected_cluster_ids", [])
+            print(f"    {RED}{BOLD}{atype}{RESET}  severity={sev:.1f}")
+            if desc:
+                print(f"    {DIM}{desc}{RESET}")
+            if affected:
+                print(f"    affected clusters: {', '.join(str(c)[:16] + '...' for c in affected)}")
+        if not anomalies:
+            print(f"    {DIM}(Observer detects anomalies when multiple clusters drift simultaneously){RESET}")
     except Exception as e:
         print(f"  {YELLOW}Observer anomalies: {e}{RESET}")
 
+    # Observer summary
+    print()
     try:
         summary = pss.get_observer_summary()
-        info("Observer summary", str(summary)[:80] + ("..." if len(str(summary)) > 80 else ""))
+        info("Observer summary", "")
+        info("  Registered regions", str(len(summary.get("registered_regions", []))))
+        info("  Clusters observed", str(summary.get("total_clusters_observed", "N/A")))
+        info("  Last sample at", str(summary.get("last_sample_at", "N/A")))
+        info("  Total anomalies", str(summary.get("anomaly_count", 0)))
     except Exception as e:
         print(f"  {YELLOW}Observer summary: {e}{RESET}")
 
