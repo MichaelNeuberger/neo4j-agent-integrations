@@ -1302,14 +1302,20 @@ def scenario_shift_handoff(mcp: PSSMCPServer, driver):
     neo4j_volkov = mcp.create_pss_session(agent_id="volkov-night-shift")
     neo4j_volkov_sid = neo4j_volkov["session_id"]
     volkov_pss_sid = None
+    volkov_prev_response = None
 
     for i, (msg, entity_refs) in enumerate(night_queries):
-        result = pss.run(msg, session_id=volkov_pss_sid, short_circuit_threshold=0.99)
+        # Inline-store: send previous response with this /run call
+        result = pss.run(msg, session_id=volkov_pss_sid,
+                         response=volkov_prev_response, short_circuit_threshold=0.99)
         volkov_pss_sid = result["session_id"]
         mcp_result = mcp.detect_drift(neo4j_volkov_sid, msg)
         response = generate_response(msg, agent_role=volkov_role,
                                      pss_context=result.get("context", ""))
+        volkov_prev_response = response  # buffer for next inline-store
         mcp.store_response(neo4j_volkov_sid, response)
+        # Also store explicitly so PSS has the response even if no next /run follows
+        pss.store(volkov_pss_sid, response)
         sim = result["top_similarity"]
         drift_score = result["drift_score"]
         drift_phase = result.get("drift_phase", "stable")
@@ -1405,12 +1411,16 @@ def scenario_shift_handoff(mcp: PSSMCPServer, driver):
           ("Medication", "Lisinopril 10mg")]),
     ]
 
+    tanaka_prev_response = None
     for i, (msg, entity_refs) in enumerate(day_queries):
-        result = pss.run(msg, session_id=tanaka_pss_sid, short_circuit_threshold=0.65)
+        result = pss.run(msg, session_id=tanaka_pss_sid,
+                         response=tanaka_prev_response, short_circuit_threshold=0.65)
         mcp_result = mcp.detect_drift(neo4j_tanaka_sid, msg)
         response = generate_response(msg, agent_role=tanaka_role,
                                      pss_context=result.get("context", ""))
+        tanaka_prev_response = response
         mcp.store_response(neo4j_tanaka_sid, response)
+        pss.store(tanaka_pss_sid, response)
         sim = result["top_similarity"]
         drift_score = result["drift_score"]
         drift_phase = result.get("drift_phase", "stable")
