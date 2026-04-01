@@ -1174,11 +1174,16 @@ def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
         ("What is the latest infection control audit status at Memorial General?",
          [("Facility", "Memorial General Hospital")]),
     ]
+    cardio_prev = None
     for i, (msg, entity_refs) in enumerate(cardio_run_msgs):
         cdata = pss.cluster_run(cid_a, msg, short_circuit_threshold=0.60)
+        # Also run on member session so drift propagates to Region
+        member_r = pss.run(msg, session_id=cardio_sess_id, response=cardio_prev)
         mcp_result = mcp.detect_drift(neo4j_cardio_sid, msg)
         response = generate_response(msg, agent_role=cardio_role,
                                      pss_context=cdata.get("context", ""))
+        cardio_prev = response
+        pss.store(cardio_sess_id, response)
         mcp.store_response(neo4j_cardio_sid, response)
         sim = cdata.get("top_similarity", 0.0)
         sc = cdata.get("short_circuit", False)
@@ -1242,11 +1247,16 @@ def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
         ("What is the current bed availability at Riverside Medical Center?",
          [("Facility", "Riverside Medical Center")]),
     ]
+    emerg_prev = None
     for i, (msg, entity_refs) in enumerate(emerg_run_msgs):
         cdata = pss.cluster_run(cid_b, msg, short_circuit_threshold=0.60)
+        # Also run on member session so drift propagates to Region
+        member_r = pss.run(msg, session_id=emerg_sess_id, response=emerg_prev)
         mcp_result = mcp.detect_drift(neo4j_emerg_sid, msg)
         response = generate_response(msg, agent_role=emerg_role,
                                      pss_context=cdata.get("context", ""))
+        emerg_prev = response
+        pss.store(emerg_sess_id, response)
         mcp.store_response(neo4j_emerg_sid, response)
         sim = cdata.get("top_similarity", 0.0)
         sc = cdata.get("short_circuit", False)
@@ -1373,12 +1383,34 @@ def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
                 MERGE (s)-[:INVESTIGATED {phase: 'cluster-facility', step: 0, drift_score: 0.0}]->(f)
             """, sid=sess_id, fac=fac_name).consume()
 
+        # Show topology
+        result = list(db.run("""
+            MATCH (r:Region)-[:CONTAINS_CLUSTER]->(c:Cluster)
+            OPTIONAL MATCH (s:AgentSession)-[m:MEMBER_OF]->(c)
+            RETURN r.name AS region, c.name AS cluster, s.agent_id AS agent, m.facility AS facility
+            ORDER BY c.name, s.agent_id
+        """))
+        for row in result:
+            print(f"  {GREEN}{row['region']}{RESET} → {CYAN}{row['cluster']}{RESET} "
+                  f"← {row['agent'] or '?'} ({row['facility'] or '?'})")
+
+        result2 = list(db.run("""
+            MATCH (s:AgentSession)-[inv:INVESTIGATED]->(e)
+            WHERE s.agent_id IN ['cardio-memorial', 'emerg-riverside']
+            RETURN s.agent_id AS agent, labels(e)[0] AS type, e.name AS entity, inv.step AS step
+            ORDER BY s.agent_id, inv.step
+        """))
+        if result2:
+            print()
+            for r in result2:
+                print(f"  {DIM}{r['agent']} step {r['step']} → {r['type']}:{r['entity']}{RESET}")
+
     # ── Summary ──
     subheader("Hospital Network Consensus Summary")
     info("Region", "hospital-network (consensus_threshold=0.5)")
     info("Cluster A", f"cardiology-memorial — {len(cardiology_seed)} seeded, {len(cardio_run_msgs)} run")
     info("Cluster B", f"emergency-riverside — {len(emergency_seed)} seeded, {len(emerg_run_msgs)} run")
-    info("Pivot query", f"Step 5 — infection control audit (drift trigger)")
+    info("Pivot query", "Both clusters drift on admin-topic pivot (step 5)")
     info("Neo4j", "Region → CONTAINS_CLUSTER → Clusters → MEMBER_OF ← Sessions")
 
     # Cleanup PSS
