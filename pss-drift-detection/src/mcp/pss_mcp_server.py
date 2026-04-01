@@ -105,16 +105,11 @@ class PSSMCPServer:
         return {
             "context": result["context"],
             "drift_score": result["drift_score"],
-            "pss_drift_score": result["pss_drift_score"],
             "drift_detected": result["drift_detected"],
-            "pss_drift_detected": result["pss_drift_detected"],
             "drift_phase": result["drift_phase"].value,
             "severity": result["severity"].value,
             "top_similarity": result["top_similarity"],
-            "similarity_drop": result["similarity_drop"],
-            "rolling_avg": result["rolling_avg"],
             "short_circuit": result["short_circuit"],
-            "context_reset": result["context_reset"],
             "state_id": result["state_id"],
             "step": result["step"],
         }

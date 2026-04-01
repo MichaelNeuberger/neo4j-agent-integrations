@@ -216,12 +216,10 @@ def scenario_live_drift(mcp: PSSMCPServer, driver):
         result = mcp.detect_drift(sid, msg)
         pss_latency = (time.time() - t0) * 1000
 
-        drift = result["drift_score"]
-        pss_drift = result.get("pss_drift_score", drift)
-        phase = result["drift_phase"]
-        severity = result["severity"]
         sim = result["top_similarity"]
-        sim_drop = result.get("similarity_drop", 0.0)
+        drift_score = result["drift_score"]
+        phase = result["drift_phase"]
+        detected = result.get("drift_detected", False)
 
         # Generate agent response (real LLM or placeholder)
         t1 = time.time()
@@ -235,12 +233,10 @@ def scenario_live_drift(mcp: PSSMCPServer, driver):
         if USE_LLM:
             print(f"  {GREEN}Agent:{RESET} {textwrap.fill(response, 72, subsequent_indent='         ')}")
             print()
-        info("Composite Score", f"{color_drift(drift)}  {bar(drift)}")
-        info("PSS Drift Score", f"{pss_drift:.3f}")
-        info("Similarity Drop", f"{color_drift(sim_drop)}  (1 - {sim:.3f})")
+        info("Similarity", f"{sim:.3f}  {bar(sim)}")
+        info("Drift Score", f"{drift_score:.3f}")
         info("Phase", color_phase(phase))
-        info("Severity", severity)
-        info("Drift Detected", f"{RED}YES{RESET}" if result.get("drift_detected") else f"{GREEN}no{RESET}")
+        info("Drift Detected", f"{RED}YES{RESET}" if detected else f"{GREEN}no{RESET}")
         info("Context (PSS)", textwrap.shorten(result["context"], 80) if result["context"] else "(empty)")
         info("Neo4j State", f"#{result['step']}  (id: {result['state_id'][:12]}...)")
         info("Latency", f"PSS {pss_latency:.0f}ms" + (f" + LLM {llm_latency:.0f}ms" if USE_LLM else ""))
@@ -267,7 +263,7 @@ def scenario_topic_switch(mcp: PSSMCPServer, driver):
     header("Scenario 2: Drift Detection + Short-Circuit")
     print("  Four phases demonstrating drift AND short-circuit in one narrative:")
     print(f"    {GREEN}Phase 1{RESET}  Morrison diabetes workup — deep clinical context")
-    print(f"    {RED}Phase 2{RESET}  Supply chain logistics — maximum semantic distance")
+    print(f"    {RED}Phase 2{RESET}  Patel psychiatry (MDD/Sertraline/CBT) — different specialty")
     print(f"    {CYAN}Phase 3{RESET}  Rodriguez cardiology — return to clinical domain")
     print(f"    {MAGENTA}Phase 4{RESET}  Paraphrased Phase 1 queries — short-circuit, LLM skipped")
     print(f"  {BOLD}30 steps total.{RESET}\n")
@@ -302,13 +298,15 @@ def scenario_topic_switch(mcp: PSSMCPServer, driver):
         "Should we consider adding an SGLT2 inhibitor like Empagliflozin to Morrisons regimen?",
         "What is the long-term prognosis for Morrison with optimal diabetes management?",
     ]
-    # Phase 2: MAXIMUM semantic distance — supply chain logistics (not healthcare)
+    # Phase 2: Different patient, different specialty — psychiatry
+    # (References: Aisha Patel, Major Depressive Disorder, Sertraline 50mg, CBT)
+    # Realistic: same clinician sees next patient in a different domain.
     off_topic = [
-        "Which tier-1 suppliers are within two hops of the production bottleneck?",
-        "Find alternative shipping routes if the Rotterdam port is closed",
-        "List all components that depend on the sole-source semiconductor supplier in Taiwan",
-        "Show inventory-level shortfalls cascading from the chip shortage",
-        "Which distribution centers report the highest average shipment delay?",
+        "Aisha Patel presents with Major Depressive Disorder — what is her current treatment plan?",
+        "She is on Sertraline 50mg — what are the common side effects and monitoring requirements?",
+        "Is Cognitive Behavioral Therapy recommended alongside Sertraline for treatment-resistant depression?",
+        "What PHQ-9 score threshold should trigger a medication adjustment for Patel?",
+        "Are there contraindications between Sertraline and any medications Patel might be taking?",
     ]
     # Phase 3: Return to clinical — different patient, cardiology focus
     # (References: Maria Rodriguez, AMI + Hypertension, Dr. O'Brien → Dr. Okonkwo)
@@ -334,19 +332,19 @@ def scenario_topic_switch(mcp: PSSMCPServer, driver):
     )
     all_roles = (
         ["a clinical pharmacist reviewing patient James Morrison's diabetes treatment"] * len(on_topic_1)
-        + ["a supply chain logistics analyst"] * len(off_topic)
+        + ["a psychiatrist managing Aisha Patel's depression treatment"] * len(off_topic)
         + ["a cardiologist reviewing Maria Rodriguez's post-MI care"] * len(on_topic_2)
     )
 
     # Legend
     subheader("How to read the output")
-    print(f"  Each step shows a {BOLD}similarity bar{RESET} — PSS top_similarity (how well the query")
-    print(f"  matches the accumulated context).  High = on-topic, low = drifted.\n")
-    print(f"  {GREEN}{'█' * 5}{RESET} = on-topic (sim > 0.4)     "
-          f"{YELLOW}{'█' * 5}{RESET} = shifting (0.2-0.4)     "
-          f"{RED}{'█' * 5}{RESET} = drifted (< 0.2)")
-    print(f"  {BOLD}DRIFT{RESET} = similarity dropped > 0.25 below rolling avg (last 4 steps)")
-    print(f"        Detection starts at step 4 (PSS needs context first).")
+    print(f"  Each step shows the {BOLD}PSS similarity{RESET} — how well the query matches accumulated context.")
+    print(f"  All signals come directly from the PSS API, no client-side heuristics.\n")
+    print(f"  {GREEN}{'█' * 5}{RESET} sim > 0.4 (on-topic)     "
+          f"{YELLOW}{'█' * 5}{RESET} sim 0.2–0.4 (shifting)     "
+          f"{RED}{'█' * 5}{RESET} sim < 0.2 (off-topic)")
+    print(f"  {BOLD}DRIFT{RESET} = PSS drift_detected=True  (drift_score shown)")
+    print(f"  {DIM}phase{RESET} = PSS drift_phase: stable / shifting / drifted")
     print()
 
     # Map queries to healthcare entities they reference (for INVESTIGATED relationships)
@@ -369,8 +367,12 @@ def scenario_topic_switch(mcp: PSSMCPServer, driver):
         [("Patient", "James Morrison"), ("Medication", "Atorvastatin 40mg")],  # CV risk
         [("Patient", "James Morrison")],               # SGLT2i
         [("Patient", "James Morrison")],               # prognosis
-        # Phase 2: Supply chain (no healthcare entities)
-        [], [], [], [], [],
+        # Phase 2: Psychiatry — Aisha Patel
+        [("Patient", "Aisha Patel"), ("Diagnosis", "Major Depressive Disorder")],
+        [("Medication", "Sertraline 50mg")],
+        [("Treatment", "Cognitive Behavioral Therapy")],
+        [("Patient", "Aisha Patel")],
+        [("Medication", "Sertraline 50mg")],
         # Phase 3: Rodriguez cardiology
         [("Patient", "Maria Rodriguez"), ("Diagnosis", "Acute Myocardial Infarction")],
         [("Provider", "Dr. Michael O'Brien"), ("Provider", "Dr. Rachel Okonkwo")],
@@ -397,7 +399,7 @@ def scenario_topic_switch(mcp: PSSMCPServer, driver):
     for i, (msg, label, role) in enumerate(zip(all_msgs, all_labels, all_roles)):
         # Phase separator
         if label != prev_label:
-            phase_names = {"ON-TOPIC": "Phase 1: Morrison Diabetes", "OFF-TOPIC": "Phase 2: Supply Chain", "NEW-TOPIC": "Phase 3: Rodriguez Cardiology"}
+            phase_names = {"ON-TOPIC": "Phase 1: Morrison Diabetes", "OFF-TOPIC": "Phase 2: Patel Psychiatry", "NEW-TOPIC": "Phase 3: Rodriguez Cardiology"}
             phase_colors = {"ON-TOPIC": GREEN, "OFF-TOPIC": RED, "NEW-TOPIC": CYAN}
             c = phase_colors.get(label, "")
             print(f"\n  {c}{'─' * 60}")
@@ -430,15 +432,23 @@ def scenario_topic_switch(mcp: PSSMCPServer, driver):
                     drift=result["drift_score"], label=label).consume()
 
         sim = result["top_similarity"]
-        drop = result.get("similarity_drop", 0.0)
-        ravg = result.get("rolling_avg", 0.0)
+        drift_score = result["drift_score"]
+        phase = result.get("drift_phase", "stable")
         detected = result.get("drift_detected", False)
-        drift_flag = f"  {RED}{BOLD}DRIFT{RESET} (avg={ravg:.2f}, drop={drop:.2f})" if detected else ""
         if detected:
             drift_events_count += 1
 
-        # Main output: step, similarity bar, similarity value, message
-        print(f"  {i:>2}  {_sim_bar(sim)} sim={sim:.2f}  {textwrap.shorten(msg, 52)}{drift_flag}")
+        # Phase color
+        phase_c = {
+            "stable": GREEN, "shifting": YELLOW, "drifted": RED,
+        }.get(phase, DIM)
+
+        # Drift flag
+        drift_flag = f"  {RED}{BOLD}DRIFT{RESET}" if detected else ""
+
+        # Main output: step, bar, sim, drift_score, phase, message
+        print(f"  {i:>2}  {_sim_bar(sim)} sim={sim:.2f}  drift={drift_score:.2f}  "
+              f"{phase_c}{phase:>8}{RESET}  {textwrap.shorten(msg, 40)}{drift_flag}")
         if USE_LLM:
             print(f"      {DIM}A: {textwrap.shorten(response, 68)}{RESET}")
 
@@ -477,15 +487,16 @@ def scenario_topic_switch(mcp: PSSMCPServer, driver):
     total_steps = n_phases123 + len(short_circuit_queries)
     n1, n2, n3 = len(on_topic_1), len(off_topic), len(on_topic_2)
 
-    print(f"  Steps:  {total_steps} total  ({n1} diabetes + {n2} supply chain + {n3} cardiology + {len(short_circuit_queries)} paraphrase)")
+    print(f"  Steps:  {total_steps} total  ({n1} diabetes + {n2} psychiatry + {n3} cardiology + {len(short_circuit_queries)} paraphrase)")
     print(f"  Drift:  {drift_events_count} events stored in Neo4j")
     print(f"  HITs:   {sc_hits}/{len(short_circuit_queries)} paraphrases recognized  (threshold: sim >= {sc_threshold})")
     print(f"  LLM:    {total_steps - sc_hits} calls made, {sc_hits} skipped\n")
 
-    print(f"  {BOLD}Drift detection:{RESET}")
-    print(f"    Signal:    PSS top_similarity (cosine between query and accumulated context)")
-    print(f"    Baseline:  rolling average of last 4 similarity values")
-    print(f"    Trigger:   current sim drops > 0.25 below rolling avg (after step 4)")
+    print(f"  {BOLD}All signals from PSS API:{RESET}")
+    print(f"    drift_detected   PSS flags topic switch (drift_score >= threshold)")
+    print(f"    drift_score      semantic drift intensity (0.0–1.0)")
+    print(f"    top_similarity   cosine match between query and accumulated context")
+    print(f"    short_circuit    paraphrase recognized, LLM skippable")
 
     phase_info = mcp.get_phase(neo4j_sid)
     print(f"\n  Final phase: {color_phase(phase_info.get('phase', 'N/A') or 'N/A')}")
@@ -1283,7 +1294,7 @@ def main():
 
     scenarios = {
         "1": ("Live Drift Detection — type messages, watch drift in real-time", scenario_live_drift),
-        "2": ("Drift + Short-Circuit — Morrison diabetes → supply chain → Rodriguez cardiology → paraphrase HITs", scenario_topic_switch),
+        "2": ("Drift + Short-Circuit — Morrison diabetes → Patel psychiatry → Rodriguez cardiology → paraphrase HITs", scenario_topic_switch),
         "3": ("Multi-Agent Comparison — focused vs exploring vs chaotic agents", scenario_multi_agent),
         "4": ("Memory & Recall — store, search, consolidate multi-tier memories", scenario_memory),
         "5": ("Cross-Session Analytics — influence, stability, phase transitions", scenario_analytics),
