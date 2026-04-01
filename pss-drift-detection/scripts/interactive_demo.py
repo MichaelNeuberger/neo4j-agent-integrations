@@ -875,6 +875,7 @@ def scenario_medication_safety(mcp: PSSMCPServer, driver):
     # ── Step 2: Add drift anchor (oncology domain) ──
     subheader("Step 2: Set drift anchor — oncology domain")
     anchor_text = "oncology chemotherapy cancer treatment cytotoxic drugs Carlos Gutierrez"
+    print(f"  {DIM}Computing oncology domain embedding...{RESET}")
     oncology_embedding = embed(anchor_text)
     try:
         result = pss.add_anchor(sid, oncology_embedding)
@@ -1644,150 +1645,100 @@ def scenario_explorer(mcp: PSSMCPServer, driver):
 
     examples = [
         # ════════════════════════════════════════════════════════════════
-        #  TABLE QUERIES  (switch to Table view in Neo4j Browser)
+        #  TABLE QUERIES  (copy to Neo4j Browser → Table view)
         # ════════════════════════════════════════════════════════════════
 
-        # ── Overview ──
-        ("TABLE  Database overview — node type counts",
+        ("TABLE  Database overview — node types and counts",
          "MATCH (n) RETURN labels(n)[0] AS type, count(n) AS count ORDER BY count DESC"),
 
-        ("TABLE  Relationship type distribution",
-         """MATCH ()-[r]->()
-RETURN type(r) AS relationship, count(r) AS count
-ORDER BY count DESC"""),
-
-        # ── Agent Dashboard ──
-        ("TABLE  Agent dashboard — phase, drift, stability",
+        ("TABLE  Agent dashboard — all sessions with phase + drift stats",
          """MATCH (s:AgentSession)
 OPTIONAL MATCH (s)-[:CURRENT_PHASE]->(p:Phase)
 OPTIONAL MATCH (s)-[:CURRENT_STATE]->(st:SemanticState)
 OPTIONAL MATCH (d:DriftEvent {session_id: s.session_id})
-WITH s, p, st,
-     count(d) AS drift_events,
+WITH s, p, st, count(d) AS drift_events,
      round(coalesce(avg(d.drift_score), 0) * 1000) / 1000 AS avg_drift
-RETURN s.agent_id AS agent,
-       s.status AS status,
-       coalesce(p.name, 'N/A') AS phase,
-       coalesce(st.step, 0) AS steps,
-       round(coalesce(st.beta, 0) * 1000) / 1000 AS last_composite,
-       drift_events,
-       avg_drift
-ORDER BY drift_events DESC, agent"""),
+RETURN s.agent_id AS agent, s.status AS status,
+       coalesce(p.name, 'N/A') AS phase, coalesce(st.step, 0) AS steps,
+       drift_events, avg_drift
+ORDER BY drift_events DESC"""),
 
-        ("TABLE  Drift events — severity breakdown per agent",
-         """MATCH (d:DriftEvent)
-WITH d.session_id AS sid, d.severity AS sev, count(*) AS cnt
-MATCH (s:AgentSession {session_id: sid})
-RETURN s.agent_id AS agent, sev AS severity, cnt
-ORDER BY agent, severity"""),
+        ("TABLE  Ward round (Sc.3) — who investigated David Park?",
+         """MATCH (s:AgentSession)-[inv:INVESTIGATED]->(e)
+WHERE s.agent_id IN ['chen-baseline', 'volkov-pulm', 'tanaka-cardio']
+RETURN s.agent_id AS doctor, inv.phase AS role, labels(e)[0] AS entity_type,
+       e.name AS entity, inv.step AS step
+ORDER BY s.agent_id, inv.step"""),
 
-        # ── State Chain as Table ──
-        ("TABLE  State trajectory — step-by-step drift metrics",
-         """MATCH (s:AgentSession {agent_id: 'drift-shortcircuit-demo'})
-      -[:CURRENT_STATE]->(current:SemanticState)
-MATCH path = (current)-[:STATE_HISTORY*0..]->(old:SemanticState)
-WITH nodes(path) AS chain, relationships(path) AS rels
-UNWIND range(0, size(chain)-1) AS idx
-WITH chain[idx] AS node,
-     CASE WHEN idx < size(rels) THEN rels[idx].cosine_similarity ELSE 1.0 END AS sim
-RETURN node.step AS step,
-       round(node.beta * 1000) / 1000 AS composite,
-       round(node.mean_similarity * 1000) / 1000 AS similarity,
-       round(node.variance * 1000) / 1000 AS pss_drift,
-       round(sim * 1000) / 1000 AS cosine_to_prev
-ORDER BY node.step"""),
+        ("TABLE  Cluster members — which agents belong to which cluster?",
+         """MATCH (s:AgentSession)-[m:MEMBER_OF]->(c:Cluster)
+RETURN c.name AS cluster, s.agent_id AS agent, m.role AS role, m.facility AS facility
+ORDER BY c.name, s.agent_id"""),
 
-        ("TABLE  Phase transition matrix (Markov counts)",
-         """MATCH (p1:Phase)-[:TRANSITIONED_TO]->(p2:Phase)
-RETURN p1.name AS from_phase, p2.name AS to_phase, count(*) AS transitions
-ORDER BY transitions DESC"""),
-
-        ("TABLE  Stability ranking — most stable to most volatile",
-         """MATCH (s:AgentSession)-[:CURRENT_STATE]->(current:SemanticState)
-MATCH chain = (current)-[:STATE_HISTORY*0..]->(old:SemanticState)
-WITH s, relationships(chain) AS rels
-WHERE size(rels) > 0
-WITH s,
-     reduce(total = 0.0, r IN rels | total + r.cosine_similarity) / size(rels) AS avg_sim,
-     size(rels) + 1 AS depth
-RETURN s.agent_id AS agent,
-       depth AS states,
-       round(avg_sim * 1000) / 1000 AS avg_cosine,
-       CASE WHEN avg_sim > 0.5 THEN 'stable'
-            WHEN avg_sim > 0.3 THEN 'moderate'
-            ELSE 'volatile' END AS verdict
-ORDER BY avg_sim DESC"""),
-
-        ("TABLE  Agents ranked by drift events and peak score",
-         """MATCH (s:AgentSession)
-OPTIONAL MATCH (d:DriftEvent {session_id: s.session_id})
-WITH s, count(d) AS events, coalesce(max(d.drift_score), 0) AS peak_drift
-OPTIONAL MATCH (s)-[:CURRENT_PHASE]->(p:Phase)
-RETURN s.agent_id AS agent,
-       events AS drift_events,
-       round(peak_drift * 1000) / 1000 AS peak_drift,
-       coalesce(p.name, 'N/A') AS current_phase
-ORDER BY events DESC, peak_drift DESC"""),
-
-        ("TABLE  Memory tiers per agent with samples",
-         """MATCH (s:AgentSession)-[:HAS_MEMORY]->(m:Memory)
-RETURN s.agent_id AS agent,
-       m.tier AS tier,
-       count(m) AS count,
-       round(avg(m.importance) * 100) / 100 AS avg_importance,
-       collect(m.text_summary)[0] AS sample
-ORDER BY agent, tier"""),
-
-        ("TABLE  Drift event provenance — state → event detail",
+        ("TABLE  Drift events — all events with severity + trigger step",
          """MATCH (st:SemanticState)-[:TRIGGERED]->(d:DriftEvent)
-RETURN d.event_id AS event,
-       d.severity AS severity,
-       round(d.drift_score * 1000) / 1000 AS score,
-       d.drift_phase AS phase,
-       st.step AS at_step,
-       round(st.mean_similarity * 1000) / 1000 AS sim_at_trigger
-ORDER BY d.timestamp DESC
-LIMIT 15"""),
+RETURN d.severity AS severity, round(d.drift_score * 100) / 100 AS score,
+       d.drift_phase AS phase, st.step AS at_step,
+       round(st.mean_similarity * 100) / 100 AS sim_at_trigger
+ORDER BY d.timestamp DESC"""),
+
+        ("TABLE  Phase transitions — Markov matrix",
+         """MATCH (p1:Phase)-[:TRANSITIONED_TO]->(p2:Phase)
+RETURN p1.name AS from_phase, p2.name AS to_phase, count(*) AS count
+ORDER BY count DESC"""),
+
+        ("TABLE  Investigation summary — which patients were investigated by which agents?",
+         """MATCH (s:AgentSession)-[:INVESTIGATED]->(p:Patient)
+WITH s, p, count(*) AS touches
+RETURN s.agent_id AS agent, p.name AS patient, touches
+ORDER BY patient, agent"""),
+
+        ("TABLE  Medication safety — all contraindications in the graph",
+         """MATCH (m1:Medication)-[:CONTRAINDICATED_WITH]->(m2:Medication)
+OPTIONAL MATCH (prov:Provider)-[:PRESCRIBED]->(m1)
+RETURN m1.name AS drug_1, m2.name AS drug_2, collect(DISTINCT prov.name) AS prescribed_by
+ORDER BY drug_1"""),
+
+        ("TABLE  Region/cluster topology — hospital network hierarchy",
+         """MATCH (r:Region)-[:CONTAINS_CLUSTER]->(c:Cluster)
+OPTIONAL MATCH (s:AgentSession)-[:MEMBER_OF]->(c)
+RETURN r.name AS region, c.name AS cluster, collect(s.agent_id) AS agents
+ORDER BY r.name, c.name"""),
 
         # ════════════════════════════════════════════════════════════════
-        #  GRAPH QUERIES  (switch to Graph view in Neo4j Browser)
+        #  GRAPH QUERIES  (copy to Neo4j Browser → Graph view)
         # ════════════════════════════════════════════════════════════════
 
-        ("GRAPH  Schema visualization",
+        ("GRAPH  Schema visualization — all node types and their relationships",
          "CALL db.schema.visualization()"),
 
-        ("GRAPH  Full agent universe — state chain + phases + drift events + memories",
-         """MATCH (s:AgentSession {agent_id: 'drift-shortcircuit-demo'})
-OPTIONAL MATCH (s)-[r1:CURRENT_STATE]->(state:SemanticState)
-OPTIONAL MATCH (s)-[r2:CURRENT_PHASE]->(phase:Phase)
-OPTIONAL MATCH (s)-[r3:HAS_MEMORY]->(mem:Memory)
-OPTIONAL MATCH stateChain = (state)-[:STATE_HISTORY*0..5]->(older:SemanticState)
-OPTIONAL MATCH (older)-[r4:TRIGGERED]->(drift:DriftEvent)
-OPTIONAL MATCH phaseChain = (phase)-[:TRANSITIONED_TO*0..3]->(prevPhase:Phase)
-RETURN s, state, phase, mem, older, drift, prevPhase,
-       r1, r2, r3, r4, stateChain, phaseChain"""),
+        ("GRAPH  Ward round (Sc.3) — 3 doctors → Cluster → David Park + diagnoses",
+         """MATCH (s:AgentSession)-[m:MEMBER_OF]->(c:Cluster {name: 'park-ward-round'})
+MATCH (s)-[inv:INVESTIGATED]->(e)
+OPTIONAL MATCH (e)-[r1]->(connected)
+WHERE type(r1) IN ['DIAGNOSED_WITH','TREATED_BY','PRESCRIBED','CONTRAINDICATED_WITH']
+RETURN s, m, c, inv, e, r1, connected"""),
 
-        ("GRAPH  Drift cascade — states that triggered events across all agents",
+        ("GRAPH  Hospital network (Sc.5) — Region → Clusters → Agents → Facilities",
+         """MATCH (r:Region)-[rc:CONTAINS_CLUSTER]->(c:Cluster)
+OPTIONAL MATCH (s:AgentSession)-[m:MEMBER_OF]->(c)
+OPTIONAL MATCH (s)-[inv:INVESTIGATED]->(e)
+WHERE labels(e)[0] IN ['Patient', 'Facility', 'Diagnosis']
+RETURN r, rc, c, m, s, inv, e"""),
+
+        ("GRAPH  Drift cascade — states that triggered drift events",
          """MATCH (s:AgentSession)-[:CURRENT_STATE|STATE_HISTORY*0..30]->(st:SemanticState)
 WHERE EXISTS { (st)-[:TRIGGERED]->(:DriftEvent) }
 MATCH (st)-[t:TRIGGERED]->(d:DriftEvent)
 RETURN s, st, t, d"""),
 
-        ("GRAPH  Phase Markov chain — all phase transitions as directed graph",
-         """MATCH (p1:Phase)-[t:TRANSITIONED_TO]->(p2:Phase)
-RETURN p1, t, p2"""),
-
-        ("GRAPH  Multi-agent topology — region → clusters → agents → states",
-         """MATCH (r:Region)-[rc:CONTAINS_CLUSTER]->(c:Cluster)<-[m:MEMBER_OF]-(s:AgentSession)
-OPTIONAL MATCH (s)-[cs:CURRENT_STATE]->(st:SemanticState)
-OPTIONAL MATCH (s)-[cp:CURRENT_PHASE]->(p:Phase)
-RETURN r, rc, c, m, s, cs, st, cp, p"""),
-
-        ("GRAPH  Agent memory landscape — sessions with memories coloured by tier",
-         """MATCH (s:AgentSession)-[hm:HAS_MEMORY]->(m:Memory)
-RETURN s, hm, m"""),
-
-        # ── Healthcare Graph (rich clinical network) ──
+        ("GRAPH  Agent × Patient — investigation trails through clinical graph",
+         """MATCH (s:AgentSession)-[inv:INVESTIGATED]->(pat:Patient)
+MATCH (pat)-[dx:DIAGNOSED_WITH]->(diag:Diagnosis)
+OPTIONAL MATCH (pat)-[tb:TREATED_BY]->(prov:Provider)
+OPTIONAL MATCH (treat:Treatment)-[treats:TREATS]->(diag)
+OPTIONAL MATCH (treat)-[uses:USES]->(med:Medication)
+RETURN s, inv, pat, dx, diag, tb, prov, treats, treat, uses, med"""),
 
         ("GRAPH  Clinical network — patients → diagnoses ← treatments → medications",
          """MATCH (pat:Patient)-[dx:DIAGNOSED_WITH]->(diag:Diagnosis)
@@ -1796,85 +1747,43 @@ OPTIONAL MATCH (treat)-[u:USES]->(med:Medication)
 OPTIONAL MATCH (pat)-[tb:TREATED_BY]->(prov:Provider)
 RETURN pat, dx, diag, tr, treat, u, med, tb, prov"""),
 
-        ("GRAPH  Medication safety — contraindications + who prescribes what",
+        ("GRAPH  Medication safety — contraindications + prescribers",
          """MATCH (m1:Medication)-[ci:CONTRAINDICATED_WITH]->(m2:Medication)
-OPTIONAL MATCH (prov1:Provider)-[rx1:PRESCRIBED]->(m1)
-OPTIONAL MATCH (prov2:Provider)-[rx2:PRESCRIBED]->(m2)
-RETURN m1, ci, m2, prov1, rx1, prov2, rx2"""),
+OPTIONAL MATCH (prov:Provider)-[rx:PRESCRIBED]->(m1)
+RETURN m1, ci, m2, prov, rx"""),
 
-        ("GRAPH  Provider referral network — referrals + facility affiliations + patients",
+        ("GRAPH  Provider referral network — who refers to whom + facilities",
          """MATCH (p1:Provider)-[ref:REFERRED_TO]->(p2:Provider)
 OPTIONAL MATCH (p1)-[a1:AFFILIATED_WITH]->(f1:Facility)
 OPTIONAL MATCH (p2)-[a2:AFFILIATED_WITH]->(f2:Facility)
-OPTIONAL MATCH (pat:Patient)-[tb:TREATED_BY]->(p1)
-RETURN p1, ref, p2, a1, f1, a2, f2, pat, tb"""),
+RETURN p1, ref, p2, a1, f1, a2, f2"""),
 
-        ("GRAPH  Patient journey — encounters → results → facilities → providers",
+        ("GRAPH  Patient journey — encounters → diagnoses → facilities → providers",
          """MATCH (pat:Patient)-[he:HAD_ENCOUNTER]->(enc:Encounter)
 OPTIONAL MATCH (enc)-[ri:RESULTED_IN]->(diag:Diagnosis)
 OPTIONAL MATCH (enc)-[oa:OCCURRED_AT]->(fac:Facility)
-OPTIONAL MATCH (enc)-[inc:INCLUDES]->(treat:Treatment)
 OPTIONAL MATCH (prov:Provider)-[att:ATTENDED]->(enc)
-RETURN pat, he, enc, ri, diag, oa, fac, inc, treat, prov, att"""),
+RETURN pat, he, enc, ri, diag, oa, fac, prov, att"""),
 
-        ("GRAPH  Hospital org chart — people → organizations → locations → events",
-         """MATCH (p:Person)-[wf:WORKS_FOR]->(org:Organization)
-OPTIONAL MATCH (org)-[la:LOCATED_AT]->(loc:Location)
-OPTIONAL MATCH (p)-[pi:PARTICIPATED_IN]->(evt:Event)
-RETURN p, wf, org, la, loc, pi, evt"""),
-
-        ("GRAPH  James Morrison — full clinical picture (patient-centric)",
+        ("GRAPH  James Morrison — full clinical picture + agent investigations",
          """MATCH (pat:Patient {name: 'James Morrison'})
 OPTIONAL MATCH (pat)-[dx:DIAGNOSED_WITH]->(diag:Diagnosis)
 OPTIONAL MATCH (pat)-[tb:TREATED_BY]->(prov:Provider)
-OPTIONAL MATCH (prov)-[aff:AFFILIATED_WITH]->(fac:Facility)
 OPTIONAL MATCH (prov)-[rx:PRESCRIBED]->(med:Medication)
 OPTIONAL MATCH (pat)-[he:HAD_ENCOUNTER]->(enc:Encounter)
-OPTIONAL MATCH (enc)-[ri:RESULTED_IN]->(diag2:Diagnosis)
-OPTIONAL MATCH (enc)-[inc:INCLUDES]->(treat:Treatment)
-OPTIONAL MATCH (treat)-[uses:USES]->(med2:Medication)
-RETURN pat, dx, diag, tb, prov, aff, fac, rx, med,
-       he, enc, ri, diag2, inc, treat, uses, med2"""),
+OPTIONAL MATCH (s:AgentSession)-[inv:INVESTIGATED]->(pat)
+RETURN pat, dx, diag, tb, prov, rx, med, he, enc, s, inv"""),
 
-        # ── Cross-Domain: Healthcare × PSS (INVESTIGATED relationships) ──
-
-        ("GRAPH  Agent investigation trail — which entities did the agent query?",
-         """MATCH (s:AgentSession)-[inv:INVESTIGATED]->(entity)
-OPTIONAL MATCH (s)-[cs:CURRENT_STATE]->(st:SemanticState)
-OPTIONAL MATCH (s)-[cp:CURRENT_PHASE]->(phase:Phase)
-RETURN s, inv, entity, cs, st, cp, phase"""),
-
-        ("GRAPH  Drift during investigation — agent → entities with drift events",
-         """MATCH (s:AgentSession)-[inv:INVESTIGATED]->(entity)
-WHERE inv.drift_score > 0.3
-WITH s, inv, entity
-OPTIONAL MATCH (s)-[:CURRENT_STATE|STATE_HISTORY*0..30]->(st:SemanticState)
-               -[tr:TRIGGERED]->(d:DriftEvent)
-RETURN s, inv, entity, st, tr, d"""),
-
-        ("GRAPH  Agent × Patient — investigation path through clinical graph",
-         """MATCH (s:AgentSession)-[inv:INVESTIGATED]->(pat:Patient)
-MATCH (pat)-[dx:DIAGNOSED_WITH]->(diag:Diagnosis)
-OPTIONAL MATCH (pat)-[tb:TREATED_BY]->(prov:Provider)
-OPTIONAL MATCH (treat:Treatment)-[treats:TREATS]->(diag)
-OPTIONAL MATCH (treat)-[uses:USES]->(med:Medication)
-OPTIONAL MATCH (s)-[cs:CURRENT_STATE]->(st:SemanticState)
-OPTIONAL MATCH (st)-[tr:TRIGGERED]->(d:DriftEvent)
-RETURN s, inv, pat, dx, diag, tb, prov, treats, treat, uses, med, cs, st, tr, d"""),
-
-        ("GRAPH  Full story — agent investigated Morrison, drifted to operations, pivoted to Rodriguez",
+        ("GRAPH  Full story — all agents + all healthcare entities + drift events",
          """MATCH (s:AgentSession)-[inv:INVESTIGATED]->(entity)
 OPTIONAL MATCH (entity)-[r1]->(connected)
 WHERE type(r1) IN ['DIAGNOSED_WITH','TREATED_BY','PRESCRIBED',
-                    'HAD_ENCOUNTER','AFFILIATED_WITH','LOCATED_AT']
-OPTIONAL MATCH (s)-[:CURRENT_STATE|STATE_HISTORY*0..5]->(st:SemanticState)
-               -[tr:TRIGGERED]->(d:DriftEvent)
+                    'HAD_ENCOUNTER','AFFILIATED_WITH','CONTRAINDICATED_WITH']
+OPTIONAL MATCH (s)-[:CURRENT_STATE]->(st:SemanticState)-[tr:TRIGGERED]->(d:DriftEvent)
 RETURN s, inv, entity, r1, connected, st, tr, d"""),
 
         ("GRAPH  Everything — complete graph (limit 300)",
-         """MATCH (a)-[r]->(b)
-RETURN a, r, b
-LIMIT 300"""),
+         """MATCH (a)-[r]->(b) RETURN a, r, b LIMIT 300"""),
     ]
 
     printed_graph_header = False
