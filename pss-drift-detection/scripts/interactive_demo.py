@@ -610,6 +610,10 @@ def scenario_ward_round(mcp: PSSMCPServer, driver):
         [("Patient", "David Park"), ("Encounter", "Annual Physical Exam")],
     ]
 
+    # Create Neo4j AgentSessions for each doctor
+    neo4j_chen = mcp.create_pss_session(agent_id="chen-baseline")
+    neo4j_chen_sid = neo4j_chen["session_id"]
+
     chen_sid = None
     for i, msg in enumerate(chen_queries):
         cdata = pss.cluster_run(cid, msg, short_circuit_threshold=0.99)
@@ -617,12 +621,12 @@ def scenario_ward_round(mcp: PSSMCPServer, driver):
         pss.cluster_store(cid, msg, response)
         chen_data = pss.run(msg, session_id=chen_sid, short_circuit_threshold=0.99)
         chen_sid = chen_data["session_id"]
+        mcp.detect_drift(neo4j_chen_sid, msg)
+        mcp.store_response(neo4j_chen_sid, response)
         sim = cdata.get("top_similarity", 0.0)
-        sc = cdata.get("short_circuit", False)
         print(f"  {RED}MISS{RESET}  {_sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score', 0.0):.3f}  {DIM}{textwrap.shorten(msg, 50)}{RESET}")
         if USE_LLM:
             print(f"        {DIM}A: {textwrap.shorten(response, 68)}{RESET}")
-        # INVESTIGATED: Chen → healthcare entities
         for entity_label, entity_name in chen_entity_refs[i]:
             with driver.session(database=NEO4J_DATABASE) as db:
                 db.run(f"""
@@ -630,7 +634,7 @@ def scenario_ward_round(mcp: PSSMCPServer, driver):
                     MATCH (e:{entity_label} {{name: $name}})
                     MERGE (s)-[:INVESTIGATED {{step: $step, phase: 'chen-baseline',
                            drift_score: $drift}}]->(e)
-                """, sid=chen_sid, name=entity_name, step=i,
+                """, sid=neo4j_chen_sid, name=entity_name, step=i,
                 drift=cdata.get("drift_score", 0.0)).consume()
 
     pss.add_cluster_member(cid, chen_sid)
@@ -653,12 +657,15 @@ def scenario_ward_round(mcp: PSSMCPServer, driver):
         [("Medication", "Lisinopril 10mg"), ("Diagnosis", "Chronic Obstructive Pulmonary Disease")],
     ]
 
+    neo4j_volkov = mcp.create_pss_session(agent_id="volkov-pulm")
+    neo4j_volkov_sid = neo4j_volkov["session_id"]
     volkov_sid = None
     volkov_hits = 0
     for i, msg in enumerate(volkov_queries):
         cdata = pss.cluster_run(cid, msg, short_circuit_threshold=0.52)
         volkov_data = pss.run(msg, session_id=volkov_sid, short_circuit_threshold=0.99)
         volkov_sid = volkov_data["session_id"]
+        mcp.detect_drift(neo4j_volkov_sid, msg)
         sim = cdata.get("top_similarity", 0.0)
         sc = cdata.get("short_circuit", False)
         if sc:
@@ -666,6 +673,7 @@ def scenario_ward_round(mcp: PSSMCPServer, driver):
             print(f"  {GREEN}HIT{RESET}   {_sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score',0.0):.3f}  sc={sc}  {DIM}{textwrap.shorten(msg, 46)}{RESET}")
         else:
             response = generate_response(msg, agent_role=volkov_role, pss_context=cdata.get("context", ""))
+            mcp.store_response(neo4j_volkov_sid, response)
             print(f"  {RED}MISS{RESET}  {_sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score',0.0):.3f}  sc={sc}  {DIM}{textwrap.shorten(msg, 46)}{RESET}")
             if USE_LLM:
                 print(f"        {DIM}A: {textwrap.shorten(response, 68)}{RESET}")
@@ -676,7 +684,7 @@ def scenario_ward_round(mcp: PSSMCPServer, driver):
                     MATCH (e:{entity_label} {{name: $name}})
                     MERGE (s)-[:INVESTIGATED {{step: $step, phase: 'volkov-queries',
                            drift_score: $drift}}]->(e)
-                """, sid=volkov_sid, name=entity_name, step=i,
+                """, sid=neo4j_volkov_sid, name=entity_name, step=i,
                 drift=cdata.get("drift_score", 0.0)).consume()
 
     # ── Step 4: Dr. Tanaka — novel ECG finding ──
@@ -684,6 +692,8 @@ def scenario_ward_round(mcp: PSSMCPServer, driver):
     info("Role", "Dr. Yuki Tanaka — cardiologist evaluating David Park's cardiac function")
     print()
 
+    neo4j_tanaka = mcp.create_pss_session(agent_id="tanaka-cardio")
+    neo4j_tanaka_sid = neo4j_tanaka["session_id"]
     tanaka_role = "a cardiologist evaluating David Park's cardiac function"
     tanaka_q1 = "What is the hypertension management plan for David Park?"
     cdata_t1 = pss.cluster_run(cid, tanaka_q1, short_circuit_threshold=0.52)
@@ -691,17 +701,21 @@ def scenario_ward_round(mcp: PSSMCPServer, driver):
     sc_t1 = cdata_t1.get("short_circuit", False)
     tanaka_data = pss.run(tanaka_q1, short_circuit_threshold=0.99)
     tanaka_sid = tanaka_data["session_id"]
+    mcp.detect_drift(neo4j_tanaka_sid, tanaka_q1)
 
     if sc_t1:
         print(f"  {GREEN}HIT{RESET}   {_sim_bar(sim_t1)} sim={sim_t1:.3f}  drift={cdata_t1.get('drift_score',0.0):.3f}  (≈ Chen Q1)")
     else:
         resp_t1 = generate_response(tanaka_q1, agent_role=tanaka_role)
+        mcp.store_response(neo4j_tanaka_sid, resp_t1)
         print(f"  {RED}MISS{RESET}  {_sim_bar(sim_t1)} sim={sim_t1:.3f}  drift={cdata_t1.get('drift_score',0.0):.3f}  (≈ Chen Q1)")
 
     # Tanaka stores novel ECG finding
     ecg_msg = "Park's latest ECG shows left ventricular hypertrophy — should we adjust treatment?"
     ecg_resp = generate_response(ecg_msg, agent_role=tanaka_role)
     pss.cluster_store(cid, ecg_msg, "LVH confirmed on ECG. Consider adding Amlodipine 5mg. Echo scheduled.")
+    mcp.detect_drift(neo4j_tanaka_sid, ecg_msg)
+    mcp.store_response(neo4j_tanaka_sid, ecg_resp)
     info("\n  Tanaka ECG finding stored", "LVH + Amlodipine recommendation")
     # INVESTIGATED: Tanaka → Park
     with driver.session(database=NEO4J_DATABASE) as db:
@@ -709,7 +723,7 @@ def scenario_ward_round(mcp: PSSMCPServer, driver):
             MATCH (s:AgentSession {session_id: $sid})
             MATCH (e:Patient {name: $name})
             MERGE (s)-[:INVESTIGATED {step: 0, phase: 'tanaka-ecg', drift_score: $drift}]->(e)
-        """, sid=tanaka_sid, name="David Park",
+        """, sid=neo4j_tanaka_sid, name="David Park",
         drift=cdata_t1.get("drift_score", 0.0)).consume()
 
     pss.add_cluster_member(cid, tanaka_sid)
@@ -758,13 +772,35 @@ def scenario_ward_round(mcp: PSSMCPServer, driver):
                 c.scenario = 'ward-round'
         """, cid=cid).consume()
         # MEMBER_OF relationships
-        for sid, role in [(chen_sid, "internist"), (volkov_sid, "pulmonologist"), (tanaka_sid, "cardiologist")]:
+        for sid, role in [(neo4j_chen_sid, "internist"), (neo4j_volkov_sid, "pulmonologist"), (neo4j_tanaka_sid, "cardiologist")]:
             if sid:
                 db.run("""
                     MATCH (s:AgentSession {session_id: $sid})
                     MATCH (c:Cluster {cluster_id: $cid})
                     MERGE (s)-[:MEMBER_OF {role: $role}]->(c)
                 """, sid=sid, cid=cid, role=role).consume()
+
+        # Show what we created
+        result = list(db.run("""
+            MATCH (s:AgentSession)-[m:MEMBER_OF]->(c:Cluster {cluster_id: $cid})
+            RETURN s.agent_id AS agent, m.role AS role
+            ORDER BY s.agent_id
+        """, cid=cid))
+        for r in result:
+            print(f"  {GREEN}{r['agent']}{RESET} ({r['role']}) → Cluster park-ward-round")
+
+        result2 = list(db.run("""
+            MATCH (s:AgentSession)-[inv:INVESTIGATED]->(e)
+            WHERE s.session_id IN [$chen_sid, $volkov_sid, $tanaka_sid]
+            RETURN s.agent_id AS agent, labels(e)[0] AS type, e.name AS entity,
+                   inv.step AS step
+            ORDER BY s.agent_id, inv.step
+        """, chen_sid=neo4j_chen_sid, volkov_sid=neo4j_volkov_sid,
+             tanaka_sid=neo4j_tanaka_sid))
+        if result2:
+            print()
+            for r in result2:
+                print(f"  {DIM}{r['agent']} step {r['step']} → {r['type']}:{r['entity']}{RESET}")
 
     # ── Summary ──
     subheader("Ward Round Summary")
