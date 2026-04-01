@@ -1725,11 +1725,27 @@ OPTIONAL MATCH (prov:Provider)-[:PRESCRIBED]->(m1)
 RETURN m1.name AS drug_1, m2.name AS drug_2, collect(DISTINCT prov.name) AS prescribed_by
 ORDER BY drug_1"""),
 
-        ("TABLE  Region/cluster topology — hospital network hierarchy",
-         """MATCH (r:Region)-[:CONTAINS_CLUSTER]->(c:Cluster)
-OPTIONAL MATCH (s:AgentSession)-[:MEMBER_OF]->(c)
-RETURN r.name AS region, c.name AS cluster, collect(s.agent_id) AS agents
-ORDER BY r.name, c.name"""),
+        ("TABLE  PSS topology — clusters, regions, members (run Sc.3/5 first)",
+         """MATCH (s:AgentSession)
+OPTIONAL MATCH (s)-[m:MEMBER_OF]->(c:Cluster)
+OPTIONAL MATCH (r:Region)-[:CONTAINS_CLUSTER]->(c)
+RETURN s.agent_id AS agent, c.name AS cluster, m.role AS role,
+       m.facility AS facility, r.name AS region
+ORDER BY cluster, agent"""),
+
+        ("TABLE  Region/cluster hierarchy — full hospital network topology",
+         """MATCH (c:Cluster)
+OPTIONAL MATCH (r:Region)-[:CONTAINS_CLUSTER]->(c)
+OPTIONAL MATCH (s:AgentSession)-[m:MEMBER_OF]->(c)
+OPTIONAL MATCH (s)-[:INVESTIGATED]->(e)
+WITH r, c, s, m, count(e) AS investigations
+RETURN coalesce(r.name, '(no region)') AS region,
+       c.name AS cluster,
+       c.coupling_factor AS coupling,
+       s.agent_id AS agent,
+       coalesce(m.role, m.facility, '') AS role_or_facility,
+       investigations
+ORDER BY region, cluster, agent"""),
 
         # ════════════════════════════════════════════════════════════════
         #  GRAPH QUERIES  (copy to Neo4j Browser → Graph view)
@@ -1745,17 +1761,18 @@ OPTIONAL MATCH (e)-[r1]->(connected)
 WHERE type(r1) IN ['DIAGNOSED_WITH','TREATED_BY','PRESCRIBED','CONTRAINDICATED_WITH']
 RETURN s, m, c, inv, e, r1, connected"""),
 
-        ("GRAPH  Hospital network (Sc.5) — Region → Clusters → Agents → Facilities",
-         """MATCH (r:Region)-[rc:CONTAINS_CLUSTER]->(c:Cluster)
+        ("GRAPH  Hospital network — Region → Clusters → Agents → Facilities",
+         """MATCH (c:Cluster)
+OPTIONAL MATCH (r:Region)-[rc:CONTAINS_CLUSTER]->(c)
 OPTIONAL MATCH (s:AgentSession)-[m:MEMBER_OF]->(c)
 OPTIONAL MATCH (s)-[inv:INVESTIGATED]->(e)
 WHERE labels(e)[0] IN ['Patient', 'Facility', 'Diagnosis']
 RETURN r, rc, c, m, s, inv, e"""),
 
         ("GRAPH  Drift cascade — states that triggered drift events",
-         """MATCH (s:AgentSession)-[:CURRENT_STATE|STATE_HISTORY*0..30]->(st:SemanticState)
-WHERE EXISTS { (st)-[:TRIGGERED]->(:DriftEvent) }
-MATCH (st)-[t:TRIGGERED]->(d:DriftEvent)
+         """MATCH (st:SemanticState)-[t:TRIGGERED]->(d:DriftEvent)
+OPTIONAL MATCH (s:AgentSession)-[:CURRENT_STATE]->(current:SemanticState)
+OPTIONAL MATCH path = (current)-[:STATE_HISTORY*0..20]->(st)
 RETURN s, st, t, d"""),
 
         ("GRAPH  Agent × Patient — investigation trails through clinical graph",
