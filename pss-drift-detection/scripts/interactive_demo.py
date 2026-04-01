@@ -212,6 +212,32 @@ def embed(text: str) -> list[float]:
     return _embedder.encode(text).tolist()
 
 
+# ── Reset: clean PSS artifacts, keep healthcare template ────────────────
+
+_PSS_LABELS = [
+    "AgentSession", "SemanticState", "DriftEvent", "Phase",
+    "Memory", "MemoryCluster", "Cluster", "Region",
+    "GlobalObserver", "ConsensusEvent", "AnomalyEvent",
+]
+# Healthcare labels that must NEVER be deleted
+_HEALTHCARE_LABELS = {
+    "Patient", "Provider", "Diagnosis", "Treatment", "Encounter",
+    "Facility", "Medication", "Person", "Organization", "Location",
+    "Event", "Object", "Document", "DecisionTrace", "TraceStep",
+}
+
+
+def _reset_pss_artifacts(driver):
+    """Delete all PSS demo artifacts. Healthcare template stays untouched."""
+    with driver.session(database=NEO4J_DATABASE) as db:
+        # Delete INVESTIGATED relationships (demo-created links to healthcare)
+        db.run("MATCH ()-[r:INVESTIGATED]->() DELETE r").consume()
+        # Delete all PSS node types + their relationships
+        for label in _PSS_LABELS:
+            db.run(f"MATCH (n:{label}) DETACH DELETE n").consume()
+    print(f"  {DIM}Reset: PSS artifacts cleared, healthcare template intact{RESET}")
+
+
 # ── Scenario 1: Live Drift Detection ────────────────────────────────────
 
 def scenario_live_drift(mcp: PSSMCPServer, driver):
@@ -1900,6 +1926,9 @@ def main():
     adapter = Neo4jPSSAdapter(driver, database=NEO4J_DATABASE)
     adapter.apply_schema(SCHEMA_PATH)
 
+    # Clean PSS artifacts from previous runs, keep healthcare template intact
+    _reset_pss_artifacts(driver)
+
     mcp = PSSMCPServer(driver, database=NEO4J_DATABASE, pss_client=pss)
 
     # Check LLM
@@ -1933,6 +1962,7 @@ def main():
         print(f"  {BOLD}Choose a scenario:{RESET}\n")
         for key, (desc, _) in scenarios.items():
             print(f"    {CYAN}{key}{RESET}  {desc}")
+        print(f"    {CYAN}r{RESET}  Reset Neo4j (clear PSS artifacts, keep healthcare template)")
         print(f"    {CYAN}q{RESET}  Quit\n")
 
         try:
@@ -1942,6 +1972,11 @@ def main():
 
         if choice == "q" or choice == "quit":
             break
+
+        if choice == "r":
+            _reset_pss_artifacts(driver)
+            print(f"  {GREEN}Done — ready for a fresh run.{RESET}")
+            continue
 
         if choice in scenarios:
             try:
