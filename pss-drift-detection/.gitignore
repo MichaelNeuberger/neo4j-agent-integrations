@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Virtual env
+.venv/
+
+# Test / Coverage
+.coverage
+.pytest_cache/
+htmlcov/
+
+# UV
+uv.lock
+
+# Environment
+.env
+
+# Generated data (re-create via create-context-graph)
+pss-test-data/
