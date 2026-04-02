@@ -1134,19 +1134,26 @@ def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
          [("Patient", "James Morrison"), ("Encounter", "Emergency Room Visit")]),
     ]
 
-    info("Cardiology", f"seeding {len(cardiology_seed)} Q&A pairs")
+    # Seed cluster sessions AND build member session context (with inline-store)
+    info("Cardiology", f"seeding {len(cardiology_seed)} Q&A pairs + member context")
     cardio_sess_id = None
+    cardio_prev = None
     for msg, resp, _ in cardiology_seed:
         pss.cluster_store(cid_a, msg, resp)
-        r = pss.run(msg, session_id=cardio_sess_id, short_circuit_threshold=0.99)
+        r = pss.run(msg, session_id=cardio_sess_id, response=cardio_prev)
         cardio_sess_id = r["session_id"]
+        cardio_prev = resp
+        pss.store(cardio_sess_id, resp)
 
-    info("Emergency", f"seeding {len(emergency_seed)} Q&A pairs")
+    info("Emergency", f"seeding {len(emergency_seed)} Q&A pairs + member context")
     emerg_sess_id = None
+    emerg_prev = None
     for msg, resp, _ in emergency_seed:
         pss.cluster_store(cid_b, msg, resp)
-        r = pss.run(msg, session_id=emerg_sess_id, short_circuit_threshold=0.99)
+        r = pss.run(msg, session_id=emerg_sess_id, response=emerg_prev)
         emerg_sess_id = r["session_id"]
+        emerg_prev = resp
+        pss.store(emerg_sess_id, resp)
 
     # Register sessions as cluster members
     if cardio_sess_id:
@@ -1155,6 +1162,8 @@ def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
         pss.add_cluster_member(cid_b, emerg_sess_id)
 
     # ── Step 3: Create Region + add clusters ──
+    # IMPORTANT: Region + Observer must exist BEFORE drift events fire,
+    # otherwise the region won't receive them.
     subheader("Step 3: Create Region 'hospital-network' (consensus_threshold=0.5)")
     try:
         region = pss.create_region(name="hospital-network", consensus_threshold=0.5,
@@ -1217,7 +1226,10 @@ def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
         drift_score = cdata.get("drift_score", 0.0)
         drift_phase = cdata.get("drift_phase", "stable")
         phase_c = {"stable": GREEN, "shifting": YELLOW, "drifted": RED}.get(drift_phase, DIM)
-        drift_flag = f"  {RED}{BOLD}DRIFT{RESET}" if mcp_result.get("drift_detected") else ""
+        # Show member-session drift (this is what the region sees)
+        member_drift = member_r.get("drift_detected", False)
+        member_drift_score = member_r.get("drift_score", 0.0)
+        drift_flag = f"  {RED}{BOLD}DRIFT{RESET} (member: {member_drift_score:.2f})" if member_drift else ""
         hit_flag = f"  {GREEN}HIT{RESET}" if sc else ""
         print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
               f"{phase_c}{drift_phase:>8}{RESET}{hit_flag}{drift_flag}")
@@ -1290,7 +1302,9 @@ def scenario_hospital_consensus(mcp: PSSMCPServer, driver):
         drift_score = cdata.get("drift_score", 0.0)
         drift_phase = cdata.get("drift_phase", "stable")
         phase_c = {"stable": GREEN, "shifting": YELLOW, "drifted": RED}.get(drift_phase, DIM)
-        drift_flag = f"  {RED}{BOLD}DRIFT{RESET}" if cdata.get("drift_detected") else ""
+        member_drift = member_r.get("drift_detected", False)
+        member_drift_score = member_r.get("drift_score", 0.0)
+        drift_flag = f"  {RED}{BOLD}DRIFT{RESET} (member: {member_drift_score:.2f})" if member_drift else ""
         hit_flag = f"  {GREEN}HIT{RESET}" if sc else ""
         print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
               f"{phase_c}{drift_phase:>8}{RESET}{hit_flag}{drift_flag}")
