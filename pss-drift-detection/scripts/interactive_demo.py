@@ -11,8 +11,8 @@ Scenarios:
   7. Neo4j Graph Explorer     — Run Cypher queries directly, see the graph grow
 
 Usage:
-    python3 scripts/interactive_demo.py              # fake responses (fast)
-    python3 scripts/interactive_demo.py --llm        # real LLM responses
+    python3 scripts/interactive_demo.py              # real LLM responses (default)
+    python3 scripts/interactive_demo.py --no-llm     # skip LLM calls (shows N/A for responses)
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ NEO4J_PASSWORD = os.environ.get("NEO4J_TEST_PASSWORD", "testpassword")
 NEO4J_DATABASE = os.environ.get("NEO4J_TEST_DATABASE", "neo4j")
 SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "schema", "pss_schema.cypher")
 
-USE_LLM = "--llm" in sys.argv
+USE_LLM = "--llm" in sys.argv or "--no-llm" not in sys.argv  # LLM on by default, --no-llm to disable
 
 # ── LLM Client ──────────────────────────────────────────────────────────
 
@@ -118,9 +118,9 @@ def generate_response(
     agent_role: str = "a helpful medical research assistant",
     pss_context: str = "",
 ) -> str:
-    """Generate an agent response — real LLM or placeholder."""
+    """Generate an agent response via LLM. Returns 'N/A' if LLM is disabled."""
     if not USE_LLM:
-        return f"Acknowledged: {user_message}"
+        return "(LLM disabled — use --llm or remove --no-llm)"
     llm = get_llm()
     system = (
         f"You are {agent_role}. "
@@ -180,44 +180,27 @@ def subheader(text: str):
 def info(label: str, value: str):
     print(f"  {DIM}{label:>22}{RESET}  {value}")
 
-def _pseudo_embed(text: str, dim: int = 384) -> list[float]:
-    """Deterministic pseudo-embedding (fallback only)."""
-    vec = [0.0] * dim
-    for i, ch in enumerate(text.encode("utf-8")):
-        idx = (ch * (i + 1)) % dim
-        vec[idx] += math.sin(ch * 0.1 + i * 0.01)
-    norm = math.sqrt(sum(v * v for v in vec))
-    return [v / norm for v in vec] if norm > 0 else vec
-
-
-# Real embedding via sentence-transformers (GPU → CPU fallback)
+# Real embedding via sentence-transformers (GPU → CPU)
 _embedder = None
 
 def embed(text: str) -> list[float]:
     """Embed text using all-MiniLM-L6-v2 (GPU if available, else CPU).
-    Falls back to _pseudo_embed if sentence-transformers is not installed."""
+    Raises ImportError if sentence-transformers is not installed."""
     global _embedder
     if _embedder is None:
-        try:
-            import warnings, logging, io, contextlib
-            warnings.filterwarnings("ignore")
-            os.environ["TOKENIZERS_PARALLELISM"] = "false"
-            os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-            os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
-            for logger_name in ["sentence_transformers", "huggingface_hub", "transformers"]:
-                logging.getLogger(logger_name).setLevel(logging.ERROR)
-            # Suppress all stderr during import + model load
-            with contextlib.redirect_stderr(io.StringIO()):
-                from sentence_transformers import SentenceTransformer
-                import torch
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                _embedder = SentenceTransformer("all-MiniLM-L6-v2", device=device)
-            print(f"  {DIM}Embedder: all-MiniLM-L6-v2 on {device}{RESET}")
-        except ImportError:
-            _embedder = "fallback"
-            print(f"  {YELLOW}sentence-transformers not installed — using pseudo-embeddings{RESET}")
-    if _embedder == "fallback":
-        return _pseudo_embed(text)
+        import warnings, logging, io, contextlib
+        warnings.filterwarnings("ignore")
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "1"
+        for logger_name in ["sentence_transformers", "huggingface_hub", "transformers"]:
+            logging.getLogger(logger_name).setLevel(logging.ERROR)
+        with contextlib.redirect_stderr(io.StringIO()):
+            from sentence_transformers import SentenceTransformer
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            _embedder = SentenceTransformer("all-MiniLM-L6-v2", device=device)
+        print(f"  {DIM}Embedder: all-MiniLM-L6-v2 on {device}{RESET}")
     return _embedder.encode(text).tolist()
 
 
@@ -862,20 +845,10 @@ def scenario_medication_safety(mcp: PSSMCPServer, driver):
 
     # ── Step 1: Create session ──
     subheader("Step 1: Create PSS session with enable_topic_switch")
-    try:
-        sess = pss.create_session(enable_topic_switch=True)
-        sid = sess["session_id"]
-        info("Session ID", sid[:20] + "...")
-        info("Layer", "1b — session control enabled")
-    except Exception as e:
-        # Fallback: use /run to create session
-        print(f"  {YELLOW}create_session: {e} — falling back to /run{RESET}")
-        sess = pss.run(
-            "Carlos Gutierrez oncology pharmacist session init",
-            short_circuit_threshold=0.99,
-        )
-        sid = sess["session_id"]
-        info("Session ID", sid[:20] + "... (fallback)")
+    sess = pss.create_session(enable_topic_switch=True)
+    sid = sess["session_id"]
+    info("Session ID", sid[:20] + "...")
+    info("Layer", "1b — session control enabled")
 
     # Also mirror to Neo4j
     neo4j_sess = mcp.create_pss_session(agent_id="oncology-safety-guard")
@@ -1984,7 +1957,7 @@ def main():
         except Exception as e:
             llm_status = f"{RED}error: {e}{RESET}"
     else:
-        llm_status = f"{DIM}off — use --llm to enable real LLM responses{RESET}"
+        llm_status = f"{YELLOW}disabled{RESET} (--no-llm flag, responses will show N/A)"
 
     info("Neo4j", f"{GREEN}Connected{RESET} ({NEO4J_URI})")
     info("PSS API", pss_status)
