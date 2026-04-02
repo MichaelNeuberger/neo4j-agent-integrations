@@ -21,3 +21,4 @@ uv.lock
 
 # Generated data (re-create via create-context-graph)
 pss-test-data/
+docs/plans/
