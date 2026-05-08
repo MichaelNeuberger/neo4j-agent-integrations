@@ -94,31 +94,46 @@ def seed_healthcare_graph(driver, fixtures: dict):
             print(f"  {label}: {len(items)} entities")
 
     relationships = fixtures.get("relationships", [])
+    rels_loaded = 0
+    rels_skipped = 0
     with driver.session(database=NEO4J_DATABASE) as session:
         for rel in relationships:
             source_label = rel.get("source_label", "")
             target_label = rel.get("target_label", "")
             rel_type = rel.get("type", "RELATED_TO")
-            source_name = rel.get("source", "")
-            target_name = rel.get("target", "")
+            # The fixtures use ``source_name`` / ``target_name``. The
+            # earlier ``rel.get("source") / rel.get("target")`` lookups
+            # always returned "" and silently dropped every edge.
+            source_name = rel.get("source_name") or rel.get("source", "")
+            target_name = rel.get("target_name") or rel.get("target", "")
             props = rel.get("properties", {})
 
-            if source_name and target_name:
-                prop_str = ""
-                if props:
-                    prop_str = " {" + ", ".join(f"{k}: ${k}" for k in props) + "}"
-                query = f"""
-                MATCH (a:{source_label} {{name: $source_name}})
-                MATCH (b:{target_label} {{name: $target_name}})
-                MERGE (a)-[:{rel_type}{prop_str}]->(b)
-                """
-                try:
-                    session.run(query, source_name=source_name, target_name=target_name, **props).consume()
-                except Exception:
-                    pass
+            if not (source_name and target_name and source_label and target_label):
+                rels_skipped += 1
+                continue
 
-    print(f"  {len(relationships)} relationships")
-    print(f"  Total: {total_entities} entities, {len(relationships)} relationships")
+            prop_str = ""
+            if props:
+                prop_str = " {" + ", ".join(f"{k}: ${k}" for k in props) + "}"
+            query = (
+                f"MATCH (a:{source_label} {{name: $source_name}}) "
+                f"MATCH (b:{target_label} {{name: $target_name}}) "
+                f"MERGE (a)-[:{rel_type}{prop_str}]->(b)"
+            )
+            try:
+                session.run(query, source_name=source_name,
+                            target_name=target_name, **props).consume()
+                rels_loaded += 1
+            except Exception as exc:
+                rels_skipped += 1
+                # Surface mismatched node labels rather than silently
+                # dropping; the previous bug went undetected for months.
+                print(f"  {rel_type} {source_label}:{source_name!r} -> "
+                      f"{target_label}:{target_name!r}  skipped ({exc})")
+
+    print(f"  {rels_loaded} relationships loaded "
+          f"({rels_skipped} skipped of {len(relationships)})")
+    print(f"  Total: {total_entities} entities, {rels_loaded} relationships")
 
 
 def seed_agent_sessions(driver):

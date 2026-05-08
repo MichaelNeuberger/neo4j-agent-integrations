@@ -57,6 +57,7 @@ from src.persistence.neo4j_memory_store import Neo4jMemoryStore
 from src.analytics.similarity import SimilarityAnalyzer
 from src.analytics.influence import InfluenceAnalyzer
 from src.analytics.trajectories import TrajectoryAnalyzer
+from scripts.demo_helpers import sim_bar
 
 # ── Config ──────────────────────────────────────────────────────────────
 
@@ -766,16 +767,6 @@ def scenario_topic_switch(mcp: SemvecMCPServer, driver):
     drift_events_count = 0
     BAR_W = 20  # bar width
 
-    def _sim_bar(sim: float) -> str:
-        """Similarity bar — green=on-topic, yellow=shifting, red=drifted."""
-        filled = int(min(sim, 1.0) * BAR_W)
-        if sim > 0.4:
-            return f"{GREEN}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-        elif sim > 0.2:
-            return f"{YELLOW}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-        else:
-            return f"{RED}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-
     prev_label = None
     for i, (msg, label, role) in enumerate(zip(all_msgs, all_labels, all_roles)):
         # Phase separator
@@ -845,7 +836,7 @@ def scenario_topic_switch(mcp: SemvecMCPServer, driver):
         }.get(semvec_phase, DIM)
         drift_flag = f"  {RED}{BOLD}DRIFT{RESET}" if detected else ""
 
-        print(f"  {i:>2}  {_sim_bar(sim)} sim={sim:.2f}  drift={drift_score:.2f}  "
+        print(f"  {i:>2}  {sim_bar(sim)} sim={sim:.2f}  drift={drift_score:.2f}  "
               f"{phase_c}{semvec_phase:>8}{RESET}  {textwrap.shorten(msg, 40)}{drift_flag}")
         if USE_LLM:
             print(f"      {DIM}A: {textwrap.shorten(response, 68)}{RESET}")
@@ -937,15 +928,6 @@ def scenario_ward_round(mcp: SemvecMCPServer, driver):
 
     BAR_W = 20
 
-    def _sim_bar(sim: float) -> str:
-        filled = int(min(sim, 1.0) * BAR_W)
-        if sim > 0.4:
-            return f"{GREEN}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-        elif sim > 0.2:
-            return f"{YELLOW}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-        else:
-            return f"{RED}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-
     # ── Step 1: Create cluster ──
     subheader("Step 1: Create Semvec cluster 'park-ward-round'")
     try:
@@ -998,7 +980,7 @@ def scenario_ward_round(mcp: SemvecMCPServer, driver):
         sim = cdata.get("top_similarity", 0.0)
         # Threshold deliberately at 0.99 so every Chen turn MISSes; this
         # is the seeding phase, the cluster cache must be primed first.
-        print(f"  {DIM}seed MISS{RESET}  {_sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score', 0.0):.3f}  {DIM}{textwrap.shorten(msg, 50)}{RESET}")
+        print(f"  {DIM}seed MISS{RESET}  {sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score', 0.0):.3f}  {DIM}{textwrap.shorten(msg, 50)}{RESET}")
         if USE_LLM:
             print(f"        {DIM}A: {textwrap.shorten(response, 68)}{RESET}")
         for entity_label, entity_name in chen_entity_refs[i]:
@@ -1049,11 +1031,11 @@ def scenario_ward_round(mcp: SemvecMCPServer, driver):
         response = ""
         if sc:
             volkov_hits += 1
-            print(f"  {GREEN}HIT{RESET}   {_sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score',0.0):.3f}  sc={sc}  {DIM}{textwrap.shorten(msg, 46)}{RESET}")
+            print(f"  {GREEN}HIT{RESET}   {sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score',0.0):.3f}  sc={sc}  {DIM}{textwrap.shorten(msg, 46)}{RESET}")
         else:
             response = generate_response(msg, agent_role=volkov_role, semvec_context=cdata.get("context", ""))
             mcp.store_response(neo4j_volkov_sid, response)
-            print(f"  {RED}MISS{RESET}  {_sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score',0.0):.3f}  sc={sc}  {DIM}{textwrap.shorten(msg, 46)}{RESET}")
+            print(f"  {RED}MISS{RESET}  {sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score',0.0):.3f}  sc={sc}  {DIM}{textwrap.shorten(msg, 46)}{RESET}")
             if USE_LLM:
                 print(f"        {DIM}A: {textwrap.shorten(response, 68)}{RESET}")
         t1 = datetime.now(timezone.utc)
@@ -1087,11 +1069,11 @@ def scenario_ward_round(mcp: SemvecMCPServer, driver):
     mcp.detect_drift(neo4j_tanaka_sid, tanaka_q1)
 
     if sc_t1:
-        print(f"  {GREEN}HIT{RESET}   {_sim_bar(sim_t1)} sim={sim_t1:.3f}  drift={cdata_t1.get('drift_score',0.0):.3f}  (≈ Chen Q1)")
+        print(f"  {GREEN}HIT{RESET}   {sim_bar(sim_t1)} sim={sim_t1:.3f}  drift={cdata_t1.get('drift_score',0.0):.3f}  (≈ Chen Q1)")
     else:
         resp_t1 = generate_response(tanaka_q1, agent_role=tanaka_role)
         mcp.store_response(neo4j_tanaka_sid, resp_t1)
-        print(f"  {RED}MISS{RESET}  {_sim_bar(sim_t1)} sim={sim_t1:.3f}  drift={cdata_t1.get('drift_score',0.0):.3f}  (≈ Chen Q1)")
+        print(f"  {RED}MISS{RESET}  {sim_bar(sim_t1)} sim={sim_t1:.3f}  drift={cdata_t1.get('drift_score',0.0):.3f}  (≈ Chen Q1)")
 
     # Tanaka stores novel ECG finding
     ecg_msg = "Park's latest ECG shows left ventricular hypertrophy — should we adjust treatment?"
@@ -1124,9 +1106,9 @@ def scenario_ward_round(mcp: SemvecMCPServer, driver):
     drift_v2 = cdata_v2.get("drift_score", 0.0)
     phase_v2 = cdata_v2.get("drift_phase", "stable")
     if sc_v2:
-        print(f"  {GREEN}HIT{RESET}   {_sim_bar(sim_v2)} sim={sim_v2:.3f}  drift={drift_v2:.3f}  phase={phase_v2}  (Tanaka's ECG finding)")
+        print(f"  {GREEN}HIT{RESET}   {sim_bar(sim_v2)} sim={sim_v2:.3f}  drift={drift_v2:.3f}  phase={phase_v2}  (Tanaka's ECG finding)")
     else:
-        print(f"  {RED}MISS{RESET}  {_sim_bar(sim_v2)} sim={sim_v2:.3f}  drift={drift_v2:.3f}  phase={phase_v2}  (searching for ECG finding)")
+        print(f"  {RED}MISS{RESET}  {sim_bar(sim_v2)} sim={sim_v2:.3f}  drift={drift_v2:.3f}  phase={phase_v2}  (searching for ECG finding)")
 
     # ── Step 6: Apply G4 coupling feedback ──
     subheader("Step 6: Apply G4 coupling feedback")
@@ -1228,15 +1210,6 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
 
     semvec = _build_semvec_client()
     BAR_W = 20
-
-    def _sim_bar(sim: float) -> str:
-        filled = int(min(sim, 1.0) * BAR_W)
-        if sim > 0.4:
-            return f"{GREEN}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-        elif sim > 0.2:
-            return f"{YELLOW}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-        else:
-            return f"{RED}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
 
     # ── Step 1: Create session ──
     subheader("Step 1: Create Semvec session with enable_topic_switch")
@@ -1377,7 +1350,7 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
         triggered = next((k for k in TRIGGER_KEYWORDS if k.lower() in msg_lower), None)
         crit_flag = f"  {RED}{BOLD}TRIGGER {triggered}{RESET}" if triggered else ""
         facts_flag = f"  {CYAN}+{facts_this_turn} facts{RESET}" if facts_this_turn else ""
-        print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
+        print(f"  {i+1:>2}  {sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
               f"{phase_c}{drift_phase:>8}{RESET}{crit_flag}{facts_flag}")
         print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
         if USE_LLM:
@@ -1417,7 +1390,7 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
             "stable": GREEN, "shifting": YELLOW, "drifted": RED,
         }.get(drift_phase, DIM)
         quarantine_flag = f"  {RED}OFF-TOPIC{RESET}" if sim < QUARANTINE_THRESHOLD else ""
-        print(f"  {5+i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
+        print(f"  {5+i+1:>2}  {sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
               f"{phase_c}{drift_phase:>8}{RESET}{quarantine_flag}")
         print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
         print()
@@ -1469,15 +1442,6 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
 
     semvec = _build_semvec_client()
     BAR_W = 20
-
-    def _sim_bar(sim: float) -> str:
-        filled = int(min(sim, 1.0) * BAR_W)
-        if sim > 0.4:
-            return f"{GREEN}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-        elif sim > 0.2:
-            return f"{YELLOW}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-        else:
-            return f"{RED}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
 
     # Clean observer state from previous scenario runs (in-process, may carry over)
     try:
@@ -1641,7 +1605,7 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
         member_drift = _is_drift(member_r)
         drift_flag = f"  {RED}{BOLD}DRIFT{RESET} (member: {member_drift_score:.2f})" if member_drift else ""
         hit_flag = f"  {GREEN}HIT{RESET}" if sc else ""
-        print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
+        print(f"  {i+1:>2}  {sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
               f"{phase_c}{drift_phase:>8}{RESET}{hit_flag}{drift_flag}")
         print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
         if USE_LLM:
@@ -1722,7 +1686,7 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
         member_drift = _is_drift(member_r)
         drift_flag = f"  {RED}{BOLD}DRIFT{RESET} (member: {member_drift_score:.2f})" if member_drift else ""
         hit_flag = f"  {GREEN}HIT{RESET}" if sc else ""
-        print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
+        print(f"  {i+1:>2}  {sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
               f"{phase_c}{drift_phase:>8}{RESET}{hit_flag}{drift_flag}")
         print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
         if USE_LLM:
@@ -1957,15 +1921,6 @@ def scenario_shift_handoff(mcp: SemvecMCPServer, driver):
     semvec = _build_semvec_client()
     BAR_W = 20
 
-    def _sim_bar(sim: float) -> str:
-        filled = int(min(sim, 1.0) * BAR_W)
-        if sim > 0.4:
-            return f"{GREEN}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-        elif sim > 0.2:
-            return f"{YELLOW}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-        else:
-            return f"{RED}{'█' * filled}{'░' * (BAR_W - filled)}{RESET}"
-
     # ── Step 1: Volkov night shift — build deep context ──
     subheader("Step 1: Dr. Volkov night shift — 6 overnight queries about James Morrison")
     info("Role", "Dr. Elena Volkov, night shift internist monitoring James Morrison overnight")
@@ -2015,7 +1970,7 @@ def scenario_shift_handoff(mcp: SemvecMCPServer, driver):
         drift_score = result["drift_score"]
         drift_phase = result.get("drift_phase", "stable")
         phase_c = {"stable": GREEN, "shifting": YELLOW, "drifted": RED}.get(drift_phase, DIM)
-        print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
+        print(f"  {i+1:>2}  {sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
               f"{phase_c}{drift_phase:>8}{RESET}  {DIM}{textwrap.shorten(msg, 45)}{RESET}")
         if USE_LLM:
             print(f"      {DIM}A: {textwrap.shorten(response, 66)}{RESET}")
@@ -2041,7 +1996,7 @@ def scenario_shift_handoff(mcp: SemvecMCPServer, driver):
     )
     baseline_sim = tanaka_fresh["top_similarity"]
     baseline_sc = tanaka_fresh.get("short_circuit", False)
-    print(f"  baseline (no import): {_sim_bar(baseline_sim)} sim={baseline_sim:.3f}  "
+    print(f"  baseline (no import): {sim_bar(baseline_sim)} sim={baseline_sim:.3f}  "
           f"sc={baseline_sc}  drift={tanaka_fresh['drift_score']:.3f}")
 
     # ── Step 3: Export Volkov's session ──
@@ -2155,7 +2110,7 @@ def scenario_shift_handoff(mcp: SemvecMCPServer, driver):
         if i == 0:
             delta = sim - baseline_sim
             improvement = f"  {GREEN}+{delta:.3f} vs baseline{RESET}" if delta > 0 else f"  {YELLOW}{delta:.3f} vs baseline{RESET}"
-        print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
+        print(f"  {i+1:>2}  {sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
               f"{phase_c}{drift_phase:>8}{RESET}{context_flag}{improvement}")
         print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
         if USE_LLM:

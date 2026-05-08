@@ -584,28 +584,7 @@
       "source_label": "Patient",
       "source_name": "Maria Rodriguez",
       "target_label": "Diagnosis",
-      "target_name": "Chronic Obstructive Pulmonary Disease"
-    },
-    {
-      "type": "DIAGNOSED_WITH",
-      "source_label": "Patient",
-      "source_name": "Maria Rodriguez",
-      "target_label": "Diagnosis",
       "target_name": "Acute Myocardial Infarction"
-    },
-    {
-      "type": "DIAGNOSED_WITH",
-      "source_label": "Patient",
-      "source_name": "David Park",
-      "target_label": "Diagnosis",
-      "target_name": "Major Depressive Disorder"
-    },
-    {
-      "type": "DIAGNOSED_WITH",
-      "source_label": "Patient",
-      "source_name": "Aisha Patel",
-      "target_label": "Diagnosis",
-      "target_name": "Essential Hypertension"
     },
     {
       "type": "DIAGNOSED_WITH",
@@ -1229,6 +1208,139 @@
       "source_name": "Dr. Rachel Okonkwo",
       "target_label": "Facility",
       "target_name": "St. Mary's Regional Hospital"
+    },
+    {
+      "type": "DIAGNOSED_WITH",
+      "source_label": "Patient",
+      "source_name": "James Morrison",
+      "target_label": "Diagnosis",
+      "target_name": "Essential Hypertension"
+    },
+    {
+      "type": "DIAGNOSED_WITH",
+      "source_label": "Patient",
+      "source_name": "Aisha Patel",
+      "target_label": "Diagnosis",
+      "target_name": "Major Depressive Disorder"
+    },
+    {
+      "type": "DIAGNOSED_WITH",
+      "source_label": "Patient",
+      "source_name": "Maria Rodriguez",
+      "target_label": "Diagnosis",
+      "target_name": "Essential Hypertension"
+    },
+    {
+      "type": "DIAGNOSED_WITH",
+      "source_label": "Patient",
+      "source_name": "David Park",
+      "target_label": "Diagnosis",
+      "target_name": "Essential Hypertension"
+    },
+    {
+      "type": "DIAGNOSED_WITH",
+      "source_label": "Patient",
+      "source_name": "David Park",
+      "target_label": "Diagnosis",
+      "target_name": "Chronic Obstructive Pulmonary Disease"
+    },
+    {
+      "type": "TREATED_BY",
+      "source_label": "Patient",
+      "source_name": "Maria Rodriguez",
+      "target_label": "Provider",
+      "target_name": "Dr. Michael O'Brien"
+    },
+    {
+      "type": "TREATED_BY",
+      "source_label": "Patient",
+      "source_name": "David Park",
+      "target_label": "Provider",
+      "target_name": "Dr. Elena Volkov"
+    },
+    {
+      "type": "TREATED_BY",
+      "source_label": "Patient",
+      "source_name": "David Park",
+      "target_label": "Provider",
+      "target_name": "Dr. Yuki Tanaka"
+    },
+    {
+      "type": "TREATED_BY",
+      "source_label": "Patient",
+      "source_name": "Carlos Gutierrez",
+      "target_label": "Provider",
+      "target_name": "Dr. Sarah Chen"
+    },
+    {
+      "type": "REFERRED_TO",
+      "source_label": "Provider",
+      "source_name": "Dr. Michael O'Brien",
+      "target_label": "Provider",
+      "target_name": "Dr. Rachel Okonkwo"
+    },
+    {
+      "type": "PRESCRIBED",
+      "source_label": "Provider",
+      "source_name": "Dr. Elena Volkov",
+      "target_label": "Medication",
+      "target_name": "Metformin 500mg"
+    },
+    {
+      "type": "PRESCRIBED",
+      "source_label": "Provider",
+      "source_name": "Dr. Yuki Tanaka",
+      "target_label": "Medication",
+      "target_name": "Metformin 500mg"
+    },
+    {
+      "type": "TREATS",
+      "source_label": "Treatment",
+      "source_name": "Cardiac Catheterization",
+      "target_label": "Diagnosis",
+      "target_name": "Acute Myocardial Infarction"
+    },
+    {
+      "type": "HAD_ENCOUNTER",
+      "source_label": "Patient",
+      "source_name": "Maria Rodriguez",
+      "target_label": "Encounter",
+      "target_name": "Emergency Room Visit"
+    },
+    {
+      "type": "HAD_ENCOUNTER",
+      "source_label": "Patient",
+      "source_name": "David Park",
+      "target_label": "Encounter",
+      "target_name": "Annual Physical Exam"
+    },
+    {
+      "type": "CONTRAINDICATED_WITH",
+      "source_label": "Medication",
+      "source_name": "Amoxicillin 250mg",
+      "target_label": "Medication",
+      "target_name": "Metformin 500mg"
+    },
+    {
+      "type": "AFFILIATED_WITH",
+      "source_label": "Provider",
+      "source_name": "Dr. Elena Volkov",
+      "target_label": "Facility",
+      "target_name": "Memorial General Hospital"
+    },
+    {
+      "type": "AFFILIATED_WITH",
+      "source_label": "Provider",
+      "source_name": "Dr. Yuki Tanaka",
+      "target_label": "Facility",
+      "target_name": "Memorial General Hospital"
+    },
+    {
+      "type": "AFFILIATED_WITH",
+      "source_label": "Provider",
+      "source_name": "Dr. Sarah Chen",
+      "target_label": "Facility",
+      "target_name": "Riverside Medical Center"
     }
   ],
   "documents": [
