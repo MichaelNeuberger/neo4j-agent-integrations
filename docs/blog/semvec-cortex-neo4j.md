@@ -195,6 +195,28 @@ RETURN prev.timestamp, prev.phase, prev.beta
 ORDER BY prev.timestamp;
 ```
 
+### Live token savings
+
+The ~97% compression number from the headline table is not a once-and-for-all benchmark — every turn carries its own measurement. `SemvecChatProxy` (under `semvec.token_reduction`) wraps an OpenAI-shaped `llm_call` callable and returns the **PSS-compressed prompt token count next to what the same conversation would have cost** if you replayed the full history each turn. The wrapper exposes it via :py:meth:`SemvecClient.create_chat_proxy`:
+
+```python
+from src.core.semvec_client import SemvecClient
+
+semvec = SemvecClient(...)
+proxy = semvec.create_chat_proxy(
+    llm_call=my_llm,        # any callable returning a str; expose .last_usage to get exact counts
+    system_prompt="You are a clinical assistant.",
+)
+
+for question in clinic_questions:
+    turn = proxy.turn(question)
+    print(turn["pss_input_tokens"], "vs", turn["baseline_input_tokens"], "phase", turn["phase"])
+
+print(proxy.summary())   # {total_turns, total_pss_tokens, total_baseline_tokens, savings_pct, per_turn:[...]}
+```
+
+Scenario 1 of the demo prints both per-turn and cumulative token counts as you type — the compression ratio rises with conversation depth, exactly as the benchmark numbers predict, and it does so against your own questions and your own LLM, not a curated dataset.
+
 But this agent is alone.
 
 ---
@@ -261,6 +283,26 @@ semvec.set_isolation(session_id, level="QUARANTINE", similarity_threshold=0.55)
 ```
 
 The agent never asked about contraindications, and the LLM was never trained on this hospital's formulary — but the moment a clinician asks about a new prescription, the relevant memory surfaces because Semvec recognizes the semantic neighborhood.
+
+### Verbatim facts: dates, amounts, identifiers
+
+Semantic memory is great for *meaning* — it is dangerous for *exact values*. Compress "the next infusion is on 2026-05-15" into an embedding and a clinician later asking "when is the next infusion?" might get back "next month" or, worse, the wrong date. `semvec.compliance.extractors` solves this by pulling regex-recognised facts (ISO/DE/US dates, EUR/USD/kg/% numerics, UUID/IBAN/DE-VAT identifiers) out of free-form text **before** the input is folded into the EMA vector. Each fact lands in the literal cache where it survives compression byte-for-byte.
+
+Two thin wrappers expose the path on `SemvecClient`:
+
+```python
+text = "Carlos starts therapy on 2026-05-15. Reimbursement IBAN DE89 3704 0044 0532 0130 00."
+
+facts = semvec.extract_facts(text)
+# [{"kind": "date", "raw": "2026-05-15", "value": "2026-05-15T00:00:00+00:00", ...},
+#  {"kind": "identifier", "raw": "DE89 3704 0044 0532 0130 00",
+#   "value": "DE89370400440532013000", "id_type": "iban", ...}]
+
+semvec.store_facts_as_entities(session_id, text)
+# {"stored": 2}  — entries land in the session's literal cache
+```
+
+Two caveats worth calling out: the upstream unit whitelist is small (built for finance/operations), so medical units like `mg/m²` are not auto-detected — for those, prefer `inject_memory` with the full sentence. And the literal cache stores facts under the kind `constant` because the upstream `EntityKind` enum is closed; the original fact kind (`numeric` / `date` / `identifier`) is preserved in the entity context for downstream filtering.
 
 ### Layer 2 — Clusters: shared memory across agents
 
@@ -516,6 +558,65 @@ We also tested a top-K rolling-window detector inspired by the BMW reference imp
 
 ---
 
+## When the region needs an explicit vote: ConsensusEngine
+
+Region-level drift detection (Layer 3) flags *correlated* drift on its own — but sometimes the application wants a deliberate, named voting protocol on top of that signal. `semvec.cortex.ConsensusEngine` gives every consensus mode a first-class API: `SIMPLE_MAJORITY`, `QUALIFIED_MAJORITY`, `UNANIMOUS`, `WEIGHTED_VOTE`, `ADAPTIVE_THRESHOLD`. The wrapper threads it through:
+
+```python
+eng = semvec.create_consensus_engine(
+    local_id="hospital-orchestrator",
+    network_id="hospital-network",
+    level="qualified_majority",
+)
+for inst, weight in [("cardio", 1.0), ("emerg", 1.0), ("supervisor", 1.5)]:
+    semvec.register_consensus_voter(eng["engine_id"], inst, weight=weight)
+
+prop = semvec.submit_consensus_proposal(
+    eng["engine_id"],
+    proposal_type="admin_pivot_alert",
+    proposed_state=[0.0] * 8,
+    rationale="Both clusters drifted to facility-admin within the vote window — incident?",
+)
+semvec.vote_on_consensus(eng["engine_id"], prop["proposal_id"], True,  voting_instance="cardio")
+semvec.vote_on_consensus(eng["engine_id"], prop["proposal_id"], False, voting_instance="emerg")
+semvec.vote_on_consensus(eng["engine_id"], prop["proposal_id"], True,  voting_instance="supervisor")
+
+verdict = semvec.evaluate_consensus(eng["engine_id"], prop["proposal_id"])
+# {"accepted": True, "ratio": 0.71, "votes_for": 2, "votes_against": 1, "status": "accepted"}
+```
+
+Scenario 5 of the demo wires this directly behind the existing region-drift step: when both hospital clusters drift to admin topics, a qualified-majority vote decides whether to escalate to a network-wide incident.
+
+---
+
+## Behavioural-consistency probe after import
+
+Layer 5's checksum (`exported["checksum"]`) catches *bit-level* corruption on transfer — useful, but it cannot tell you whether the imported state actually behaves like the source. `verify_consistency` runs an embedding probe through both sessions and checks whether the cosine similarities match within a configurable tolerance:
+
+```python
+exp = semvec.export_session(volkov_session_id)
+semvec.import_session(tanaka_session_id, exp["state_dict"])
+
+# Probe with a few representative healthcare queries
+emb = SentenceTransformerEmbedder()
+probes = [emb.get_embedding(t).astype(float).tolist() for t in (
+    "Morrison overnight glucose trend",
+    "Metformin held for catheterization",
+    "Cardiac biomarkers at 6h",
+)]
+
+passed = semvec.verify_consistency(
+    tanaka_session_id, probes,
+    reference_session_id=volkov_session_id,
+    tolerance=1e-3,
+)
+print("consistency probe:", "passed" if passed else "FAILED")
+```
+
+The demo's Scenario 6 prints `consistency probe: PASSED / FAILED` directly under the import line, so a corrupted handover is visible at hand-off time, not three turns later when the wrong recommendation surfaces.
+
+---
+
 ## Production patterns
 
 A few things we've learned applying Semvec and Cortex in real deployments:
@@ -524,7 +625,7 @@ A few things we've learned applying Semvec and Cortex in real deployments:
 
 **Cluster lifecycle is short-lived by default.** A cluster maps to a unit of shared work — a ward round, an incident response, a sales call team. Create it when the work starts, delete it when it ends. Long-lived clusters drift; shared memory from three months ago usually hurts more than it helps. If you genuinely need long-term shared knowledge, promote it explicitly into the domain graph instead.
 
-**`consensus_threshold` is your false-positive dial.** Set it too low (e.g. 0.2) and you'll get region events for any random correlation. Set it too high (e.g. 0.9) and you'll never see anything until it's already a major incident. Start at 0.5 with `vote_window_seconds=60`, then tune from observed event rates.
+**`consensus_threshold` is your false-positive dial.** Set it too low (e.g. 0.2) and you'll get region events for any random correlation. Set it too high (e.g. 0.9) and you'll never see anything until it's already a major incident. Start at 0.5 with `vote_window_seconds=60`, then tune from observed event rates. When you need a *named* protocol on top of that signal — for example "any escalation needs a qualified majority of clusters plus an explicit supervisor vote" — wire `ConsensusEngine` (see "When the region needs an explicit vote" above) instead of folding it into a hand-rolled threshold.
 
 **Anchors plus QUARANTINE isolation prevent prompt injection at the semantic layer.** If your session is anchored to "oncology medication safety" and someone slips in a question about credit card numbers, the isolation filter catches it before it reaches the LLM. This is cheaper, more transparent, and more debuggable than chaining classifier prompts.
 

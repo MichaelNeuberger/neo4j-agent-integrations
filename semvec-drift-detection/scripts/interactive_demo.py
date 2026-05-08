@@ -300,15 +300,43 @@ _HEALTHCARE_LABELS = {
 }
 
 
-def _reset_semvec_artifacts(driver):
-    """Delete all Semvec demo artifacts. Healthcare template stays untouched."""
+def _reset_semvec_artifacts(driver, semvec=None):
+    """Delete all Semvec demo artifacts. Healthcare template stays untouched.
+
+    When the in-process SemvecClient is also supplied, every non-cluster
+    session in its pool is dropped via :meth:`SemvecClient.delete_session`
+    so re-running scenarios in the same process starts from a clean slate
+    on both sides (Neo4j + in-memory Semvec).
+    """
     with driver.session(database=NEO4J_DATABASE) as db:
         # Delete INVESTIGATED relationships (demo-created links to healthcare)
         db.run("MATCH ()-[r:INVESTIGATED]->() DELETE r").consume()
         # Delete all Semvec node types + their relationships
         for label in _SEMVEC_LABELS:
             db.run(f"MATCH (n:{label}) DETACH DELETE n").consume()
-    print(f"  {DIM}Reset: Semvec artifacts cleared, healthcare template intact{RESET}")
+
+    dropped = 0
+    if semvec is not None:
+        # Walk the in-process session pool. Skip cluster-backed sessions
+        # (they go away with delete_cluster); drop the rest so the next
+        # scenario does not inherit context. Refusing-on-cluster is built
+        # into delete_session, but we filter eagerly to keep the loop quiet.
+        try:
+            sm = semvec._sessions       # private but stable across 0.5.x
+            cm = semvec._clusters
+            session_ids = list(getattr(sm, "_sessions", {}).keys())
+            for sid in session_ids:
+                if cm.get_cluster(sid) is not None:
+                    continue
+                try:
+                    semvec.delete_session(sid)
+                    dropped += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    suffix = f", dropped {dropped} in-process sessions" if dropped else ""
+    print(f"  {DIM}Reset: Semvec artifacts cleared, healthcare template intact{suffix}{RESET}")
 
 
 # ── Audit-Trail: rich INVESTIGATED edges ────────────────────────────────
@@ -409,6 +437,15 @@ def scenario_live_drift(mcp: SemvecMCPServer, driver):
     info("LLM", f"{GREEN}enabled{RESET} ({os.environ['OPENAI_MODEL']})" if USE_LLM else f"{DIM}off (use --llm){RESET}")
     print()
 
+    # Live token-savings panel: compare the prompt size Semvec would
+    # send (system + compressed context + user message) against the
+    # naïve baseline (full chat history replayed each turn).
+    from semvec.token_reduction import estimate_tokens
+    chat_history: list[tuple[str, str]] = []   # (role, content)
+    pss_token_total = 0
+    baseline_token_total = 0
+    SYS_PROMPT = "You are a helpful assistant. Answer using the conversation context."
+
     step = 0
     while True:
         try:
@@ -447,6 +484,27 @@ def scenario_live_drift(mcp: SemvecMCPServer, driver):
         info("Neo4j State", f"#{result['step']}  (id: {result['state_id'][:12]}...)")
         info("Latency", f"Semvec {semvec_latency:.0f}ms" + (f" + LLM {llm_latency:.0f}ms" if USE_LLM else ""))
 
+        # Token-savings accounting for this turn
+        pss_prompt = (
+            f"{SYS_PROMPT}\n\nContext:\n{result.get('context', '')}\n\n"
+            f"User: {msg}"
+        )
+        baseline_history = [SYS_PROMPT]
+        baseline_history.extend(f"{role.capitalize()}: {content}" for role, content in chat_history)
+        baseline_history.append(f"User: {msg}")
+        baseline_prompt = "\n".join(baseline_history)
+        try:
+            pss_t = estimate_tokens(pss_prompt)
+            base_t = estimate_tokens(baseline_prompt)
+            pss_token_total += pss_t
+            baseline_token_total += base_t
+            saving = ((base_t - pss_t) / base_t * 100) if base_t else 0.0
+            info("Tokens", f"PSS {pss_t}  baseline {base_t}  ({saving:+.1f}%)")
+        except RuntimeError:
+            pass  # tiktoken not available — silently skip the panel
+        chat_history.append(("user", msg))
+        chat_history.append(("assistant", response))
+
         # Show Neo4j state chain length
         trajectory = mcp.get_state_trajectory(sid, steps=50)
         current_phase = mcp.get_phase(sid)
@@ -461,6 +519,13 @@ def scenario_live_drift(mcp: SemvecMCPServer, driver):
     info("Final Phase", summary.get("final_phase", "N/A"))
     info("Total States", str(summary.get("total_states", 0)))
     info("Drift Events", str(summary.get("total_drift_events", 0)))
+    if baseline_token_total:
+        saving_total = (baseline_token_total - pss_token_total) / baseline_token_total * 100
+        info(
+            "Tokens (cumulative)",
+            f"PSS {pss_token_total}  baseline {baseline_token_total}  "
+            f"({saving_total:+.1f}% saved)",
+        )
 
 
 # ── Scenario 2: Topic Switch Detection ──────────────────────────────────
@@ -1173,6 +1238,7 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
     ]
 
     prev_resp = None
+    facts_total = 0
     for i, (msg, entity_refs) in enumerate(oncology_queries):
         t0 = datetime.now(timezone.utc)
         result = semvec.run(msg, session_id=sid, response=prev_resp,
@@ -1181,6 +1247,15 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
         drift_score = result["drift_score"]
         drift_phase = result.get("drift_phase", "stable")
         sc = bool(result.get("short_circuit", False))
+
+        # Compliance: pull verbatim facts (dates, dosages with whitelisted
+        # units, identifiers) into the literal cache before the LLM runs.
+        # The fact extractor is regex-based and bypasses embedding compression.
+        try:
+            facts_extracted = semvec.store_facts_as_entities(sid, msg)
+            facts_total += facts_extracted.get("stored", 0)
+        except Exception:
+            pass
 
         # Mirror to Neo4j
         mcp_result = mcp.detect_drift(neo4j_sid, msg)
@@ -1255,6 +1330,7 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
     info("Contraindications injected", "3 synthetic memories")
     info("Oncology queries", f"{len(oncology_queries)} processed")
     info("Off-topic queries", f"{len(off_topic)} (quarantined if sim < 0.25)")
+    info("Verbatim facts cached", f"{facts_total} (dates / amounts / identifiers)")
     info("Neo4j", "INVESTIGATED relationships to Gutierrez + Chemo + Medications")
 
     mcp.end_agent_session(neo4j_sid)
@@ -1678,12 +1754,58 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
             for r in result2:
                 print(f"  {DIM}{r['agent']} step {r['step']} → {r['type']}:{r['entity']}{RESET}")
 
+    # ── Step 7: Cortex ConsensusEngine — qualified majority vote ──
+    subheader("Step 7: Cortex ConsensusEngine — qualified-majority vote on admin-pivot drift")
+    try:
+        eng = semvec.create_consensus_engine(
+            local_id="hospital-orchestrator",
+            network_id="hospital-network",
+            level="qualified_majority",
+        )
+        eid = eng["engine_id"]
+        for inst, weight in [
+            ("cardio-memorial", 1.0),
+            ("emerg-riverside", 1.0),
+            ("hospital-supervisor", 1.5),
+        ]:
+            semvec.register_consensus_voter(eid, inst, weight=weight)
+
+        proposal = semvec.submit_consensus_proposal(
+            eid,
+            proposal_type="admin_pivot_alert",
+            proposed_state=[0.0] * 8,
+            rationale=(
+                "Both cardiology and emergency clusters drifted to "
+                "facility-admin queries within the vote window — promote "
+                "to a hospital-wide IT incident?"
+            ),
+        )
+        pid = proposal["proposal_id"]
+        info("Proposal", f"{pid[:24]}...  status={proposal['status']}")
+
+        # Cardiology + supervisor say yes (admin signal is real),
+        # emergency abstains via "no" (we want a non-trivial split).
+        semvec.vote_on_consensus(eid, pid, True, voting_instance="cardio-memorial")
+        semvec.vote_on_consensus(eid, pid, False, voting_instance="emerg-riverside")
+        semvec.vote_on_consensus(eid, pid, True, voting_instance="hospital-supervisor")
+        verdict = semvec.evaluate_consensus(eid, pid)
+        colour = GREEN if verdict["accepted"] else YELLOW
+        info(
+            "Verdict",
+            f"{colour}{'ACCEPTED' if verdict['accepted'] else 'REJECTED'}{RESET}  "
+            f"ratio={verdict['ratio']:.2f}  "
+            f"({verdict['votes_for']} for / {verdict['votes_against']} against)",
+        )
+    except Exception as e:
+        print(f"  {YELLOW}consensus engine: {e}{RESET}")
+
     # ── Summary ──
     subheader("Hospital Network Consensus Summary")
     info("Region", "hospital-network (consensus_threshold=0.5)")
     info("Cluster A", f"cardiology-memorial — {len(cardiology_seed)} seeded, {len(cardio_run_msgs)} run")
     info("Cluster B", f"emergency-riverside — {len(emergency_seed)} seeded, {len(emerg_run_msgs)} run")
     info("Pivot query", "Both clusters drift on admin-topic pivot (step 5)")
+    info("Cortex consensus", "qualified-majority vote on the pivot alert")
     info("Neo4j", "Region → CONTAINS_CLUSTER → Clusters → MEMBER_OF ← Sessions")
 
     # Cleanup Semvec
@@ -1831,6 +1953,30 @@ def scenario_shift_handoff(mcp: SemvecMCPServer, driver):
             imported = True
         except Exception as e:
             print(f"  {YELLOW}import_session: {e}{RESET}")
+
+        # Behavioural-consistency probe — beats a bare checksum match
+        if imported:
+            try:
+                probe_text = [
+                    "Morrison overnight glucose trend",
+                    "Metformin held for catheterization",
+                    "Cardiac biomarkers at 6h",
+                ]
+                emb = SentenceTransformerEmbedder()
+                probes = [emb.get_embedding(t).astype(float).tolist() for t in probe_text]
+                consistent = semvec.verify_consistency(
+                    tanaka_semvec_sid, probes,
+                    reference_session_id=volkov_semvec_sid,
+                    tolerance=1e-3,
+                )
+                colour = GREEN if consistent else RED
+                info(
+                    "Consistency probe",
+                    f"{colour}{'PASSED' if consistent else 'FAILED'}{RESET}  "
+                    f"(3 probes, tolerance 1e-3)",
+                )
+            except Exception as e:
+                print(f"  {YELLOW}verify_consistency: {e}{RESET}")
 
     # ── Step 5: Network delta transfer (Layer 5) ──
     subheader("Step 5: Network delta transfer (Layer 5 — may 404)")
@@ -2270,7 +2416,7 @@ def main():
     adapter.apply_schema(SCHEMA_PATH)
 
     _step("clearing previous Semvec artifacts (healthcare template stays) …")
-    _reset_semvec_artifacts(driver)
+    _reset_semvec_artifacts(driver, semvec=semvec)
 
     mcp = SemvecMCPServer(driver, database=NEO4J_DATABASE, semvec_client=semvec)
 
@@ -2331,7 +2477,7 @@ def main():
             break
 
         if choice == "r":
-            _reset_semvec_artifacts(driver)
+            _reset_semvec_artifacts(driver, semvec=semvec)
             print(f"  {GREEN}Done — ready for a fresh run.{RESET}")
             continue
 
