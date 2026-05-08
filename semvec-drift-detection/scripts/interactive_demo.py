@@ -466,7 +466,16 @@ def scenario_live_drift(mcp: SemvecMCPServer, driver):
     # Live token-savings panel: compare the prompt size Semvec would
     # send (system + compressed context + user message) against the
     # naïve baseline (full chat history replayed each turn).
-    from semvec.token_reduction import estimate_tokens
+    # estimate_tokens raises RuntimeError when tiktoken is missing AND
+    # ImportError when the token_reduction module itself is missing —
+    # we tolerate both and just skip the panel.
+    try:
+        from semvec.token_reduction import estimate_tokens
+        _token_panel = True
+    except Exception as _e:
+        estimate_tokens = None  # type: ignore[assignment]
+        _token_panel = False
+        print(f"  {DIM}Token-savings panel disabled: {_e}{RESET}")
     chat_history: list[tuple[str, str]] = []   # (role, content)
     pss_token_total = 0
     baseline_token_total = 0
@@ -537,6 +546,8 @@ def scenario_live_drift(mcp: SemvecMCPServer, driver):
         baseline_history.append(f"User: {msg}")
         baseline_prompt = "\n".join(baseline_history)
         try:
+            if not _token_panel:
+                raise RuntimeError("token panel disabled at startup")
             pss_t = estimate_tokens(pss_prompt)
             base_t = estimate_tokens(baseline_prompt)
             pss_token_total += pss_t
@@ -565,8 +576,9 @@ def scenario_live_drift(mcp: SemvecMCPServer, driver):
                     info("Memories", f"{m}  (cross-over near tier limit ~15)")
             except Exception:
                 pass
-        except RuntimeError:
-            pass  # tiktoken not available — silently skip the panel
+        except Exception:
+            # tiktoken missing or token panel disabled — skip silently
+            pass
         chat_history.append(("user", msg))
         chat_history.append(("assistant", response))
 
@@ -843,7 +855,7 @@ def scenario_topic_switch(mcp: SemvecMCPServer, driver):
     print(f"\n  {MAGENTA}{'─' * 60}")
     print(f"  {BOLD}Phase 4: Short-Circuit — paraphrased Phase 1 queries{RESET}")
     print(f"  {MAGENTA}{'─' * 60}{RESET}")
-    print(f"\n  Semvec remembers the 8 diabetes Q&A pairs from Phase 1.")
+    print(f"\n  Semvec remembers the {len(on_topic_1)} diabetes Q&A pairs from Phase 1.")
     print(f"  Paraphrases with sim >= {sc_threshold} → {GREEN}HIT{RESET} (LLM skipped, cached context returned)\n")
 
     sc_hits = 0
@@ -984,7 +996,9 @@ def scenario_ward_round(mcp: SemvecMCPServer, driver):
         mcp.store_response(neo4j_chen_sid, response)
         t1 = datetime.now(timezone.utc)
         sim = cdata.get("top_similarity", 0.0)
-        print(f"  {RED}MISS{RESET}  {_sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score', 0.0):.3f}  {DIM}{textwrap.shorten(msg, 50)}{RESET}")
+        # Threshold deliberately at 0.99 so every Chen turn MISSes; this
+        # is the seeding phase, the cluster cache must be primed first.
+        print(f"  {DIM}seed MISS{RESET}  {_sim_bar(sim)} sim={sim:.3f}  drift={cdata.get('drift_score', 0.0):.3f}  {DIM}{textwrap.shorten(msg, 50)}{RESET}")
         if USE_LLM:
             print(f"        {DIM}A: {textwrap.shorten(response, 68)}{RESET}")
         for entity_label, entity_name in chen_entity_refs[i]:
@@ -1191,11 +1205,12 @@ def scenario_ward_round(mcp: SemvecMCPServer, driver):
     except Exception:
         pass
 
-    # End Neo4j sessions
-    for sid in [chen_sid, volkov_sid, tanaka_sid]:
-        if sid:
+    # End Neo4j sessions — must pass the Neo4j AgentSession ids, not
+    # the raw Semvec session ids that semvec.run() returned.
+    for nsid in [neo4j_chen_sid, neo4j_volkov_sid, neo4j_tanaka_sid]:
+        if nsid:
             try:
-                mcp.end_agent_session(sid)
+                mcp.end_agent_session(nsid)
             except Exception:
                 pass
 
@@ -1246,8 +1261,11 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
         print(f"  {YELLOW}anchor endpoint: {e}{RESET}")
 
     # ── Step 3: Add resonance triggers ──
+    # Single source of truth: the same list drives the registration
+    # call AND the per-turn display flag.
+    TRIGGER_KEYWORDS = ("CRITICAL", "contraindication")
     subheader("Step 3: Add resonance triggers")
-    for keyword in ["CRITICAL", "contraindication"]:
+    for keyword in TRIGGER_KEYWORDS:
         try:
             semvec.add_trigger(sid, keyword)
             info(f"Trigger '{keyword}'", "added — will flag high-importance turns")
@@ -1284,10 +1302,15 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
             )
 
     # ── Step 5: Set isolation to QUARANTINE ──
+    # Single source of truth — display, flag and summary all read from
+    # this constant so they cannot drift apart.
+    QUARANTINE_THRESHOLD = 0.5
     subheader("Step 5: Set input isolation to QUARANTINE")
     try:
-        semvec.set_isolation(sid, level="QUARANTINE", similarity_threshold=0.5)
-        info("Isolation level", f"{RED}QUARANTINE{RESET} (similarity_threshold=0.50)")
+        semvec.set_isolation(sid, level="QUARANTINE",
+                              similarity_threshold=QUARANTINE_THRESHOLD)
+        info("Isolation level",
+             f"{RED}QUARANTINE{RESET} (similarity_threshold={QUARANTINE_THRESHOLD:.2f})")
         info("Effect", "Off-topic inputs will be filtered")
     except Exception as e:
         print(f"  {YELLOW}isolation endpoint: {e}{RESET}")
@@ -1326,17 +1349,20 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
         drift_phase = result.get("drift_phase", "stable")
         sc = bool(result.get("short_circuit", False))
 
-        # Compliance: pull verbatim facts (dates, dosages with whitelisted
-        # units, identifiers) into the literal cache before the LLM runs.
-        # The fact extractor is regex-based and bypasses embedding compression.
+        # Compliance: pull verbatim facts (dates, currency amounts,
+        # validated IBANs, etc.) into the literal cache before the LLM
+        # runs. The fact extractor is regex-based and bypasses
+        # embedding compression so safety-critical values survive.
+        facts_this_turn = 0
         try:
             facts_extracted = semvec.store_facts_as_entities(sid, msg)
-            facts_total += facts_extracted.get("stored", 0)
+            facts_this_turn = facts_extracted.get("stored", 0)
+            facts_total += facts_this_turn
         except Exception:
             pass
 
         # Mirror to Neo4j
-        mcp_result = mcp.detect_drift(neo4j_sid, msg)
+        mcp.detect_drift(neo4j_sid, msg)
         response = generate_response(msg, agent_role=agent_role,
                                      semvec_context=result.get("context", ""))
         mcp.store_response(neo4j_sid, response)
@@ -1347,9 +1373,12 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
             "stable": GREEN, "shifting": YELLOW, "drifted": RED,
         }.get(drift_phase, DIM)
 
-        crit_flag = f"  {RED}{BOLD}TRIGGER{RESET}" if "CRITICAL" in msg else ""
+        msg_lower = msg.lower()
+        triggered = next((k for k in TRIGGER_KEYWORDS if k.lower() in msg_lower), None)
+        crit_flag = f"  {RED}{BOLD}TRIGGER {triggered}{RESET}" if triggered else ""
+        facts_flag = f"  {CYAN}+{facts_this_turn} facts{RESET}" if facts_this_turn else ""
         print(f"  {i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
-              f"{phase_c}{drift_phase:>8}{RESET}{crit_flag}")
+              f"{phase_c}{drift_phase:>8}{RESET}{crit_flag}{facts_flag}")
         print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
         if USE_LLM:
             print(f"      {DIM}A: {textwrap.shorten(response, 66)}{RESET}")
@@ -1367,7 +1396,7 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
                 short_circuit=sc,
                 extra={
                     "agent_role": agent_role,
-                    "trigger_keyword": "CRITICAL" if "CRITICAL" in msg else None,
+                    "trigger_keyword": triggered,
                 },
             )
 
@@ -1387,7 +1416,7 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
         phase_c = {
             "stable": GREEN, "shifting": YELLOW, "drifted": RED,
         }.get(drift_phase, DIM)
-        quarantine_flag = f"  {RED}OFF-TOPIC{RESET}" if sim < 0.25 else ""
+        quarantine_flag = f"  {RED}OFF-TOPIC{RESET}" if sim < QUARANTINE_THRESHOLD else ""
         print(f"  {5+i+1:>2}  {_sim_bar(sim)} sim={sim:.3f}  drift={drift_score:.3f}  "
               f"{phase_c}{drift_phase:>8}{RESET}{quarantine_flag}")
         print(f"      {DIM}{textwrap.shorten(msg, 65)}{RESET}")
@@ -1420,7 +1449,8 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
     info("Session", sid[:20] + "...")
     info("Contraindications injected", "3 synthetic memories")
     info("Oncology queries", f"{len(oncology_queries)} processed")
-    info("Off-topic queries", f"{len(off_topic)} (quarantined if sim < 0.25)")
+    info("Off-topic queries",
+         f"{len(off_topic)} (quarantined if sim < {QUARANTINE_THRESHOLD:.2f})")
     info("Verbatim facts cached", f"{facts_total} (dates / amounts / identifiers)")
     info("Neo4j", "INVESTIGATED relationships to Gutierrez + Chemo + Medications")
 
@@ -1595,7 +1625,7 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
         cdata = semvec.cluster_run(cid_a, msg, short_circuit_threshold=0.60)
         # Also run on member session so drift propagates to Region
         member_r = semvec.run(msg, session_id=cardio_sess_id, response=cardio_prev)
-        mcp_result = mcp.detect_drift(neo4j_cardio_sid, msg)
+        mcp.detect_drift(neo4j_cardio_sid, msg)
         response = generate_response(msg, agent_role=cardio_role,
                                      semvec_context=cdata.get("context", ""))
         cardio_prev = response
@@ -1676,7 +1706,7 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
         cdata = semvec.cluster_run(cid_b, msg, short_circuit_threshold=0.60)
         # Also run on member session so drift propagates to Region
         member_r = semvec.run(msg, session_id=emerg_sess_id, response=emerg_prev)
-        mcp_result = mcp.detect_drift(neo4j_emerg_sid, msg)
+        mcp.detect_drift(neo4j_emerg_sid, msg)
         response = generate_response(msg, agent_role=emerg_role,
                                      semvec_context=cdata.get("context", ""))
         emerg_prev = response
@@ -1947,8 +1977,11 @@ def scenario_shift_handoff(mcp: SemvecMCPServer, driver):
          [("Patient", "James Morrison"), ("Diagnosis", "Type 2 Diabetes Mellitus")]),
         ("Morrison's Metformin was held for catheterization — when to resume?",
          [("Medication", "Metformin 500mg"), ("Treatment", "Cardiac Catheterization")]),
+        # Troponin is checked to rule OUT AMI given Morrison's chest pain;
+        # Morrison's confirmed diagnoses are T2DM + COPD + HTN, not AMI.
+        # Link to the encounter that triggered the workup, not to AMI.
         ("Overnight troponin trend for Morrison — any elevation?",
-         [("Patient", "James Morrison"), ("Diagnosis", "Acute Myocardial Infarction")]),
+         [("Patient", "James Morrison"), ("Encounter", "Emergency Room Visit")]),
         ("Morrison's COPD — overnight SpO2 readings and oxygen requirements?",
          [("Diagnosis", "Chronic Obstructive Pulmonary Disease"), ("Patient", "James Morrison")]),
         ("Lab results from Morrison's midnight blood draw — CBC and CMP?",
@@ -1964,11 +1997,13 @@ def scenario_shift_handoff(mcp: SemvecMCPServer, driver):
 
     for i, (msg, entity_refs) in enumerate(night_queries):
         t0 = datetime.now(timezone.utc)
-        # Inline-store: send previous response with this /run call
+        # Inline-store: send previous response with this /run call.
+        # Threshold 0.99 = always MISS; we want Volkov to BUILD context
+        # turn by turn, not short-circuit on similar prior memories.
         result = semvec.run(msg, session_id=volkov_semvec_sid,
                          response=volkov_prev_response, short_circuit_threshold=0.99)
         volkov_semvec_sid = result["session_id"]
-        mcp_result = mcp.detect_drift(neo4j_volkov_sid, msg)
+        mcp.detect_drift(neo4j_volkov_sid, msg)
         response = generate_response(msg, agent_role=volkov_role,
                                      semvec_context=result.get("context", ""))
         volkov_prev_response = response  # buffer for next inline-store
@@ -2053,8 +2088,9 @@ def scenario_shift_handoff(mcp: SemvecMCPServer, driver):
                     "Metformin held for catheterization",
                     "Cardiac biomarkers at 6h",
                 ]
-                emb = SentenceTransformerEmbedder()
-                probes = [emb.get_embedding(t).astype(float).tolist() for t in probe_text]
+                # Reuse the module-level embed() helper so the MPNet
+                # model is loaded once per process, not per scenario.
+                probes = [list(map(float, embed(t))) for t in probe_text]
                 consistent = semvec.verify_consistency(
                     tanaka_semvec_sid, probes,
                     reference_session_id=volkov_semvec_sid,
@@ -2102,7 +2138,7 @@ def scenario_shift_handoff(mcp: SemvecMCPServer, driver):
         t0 = datetime.now(timezone.utc)
         result = semvec.run(msg, session_id=tanaka_semvec_sid,
                          response=tanaka_prev_response, short_circuit_threshold=0.65)
-        mcp_result = mcp.detect_drift(neo4j_tanaka_sid, msg)
+        mcp.detect_drift(neo4j_tanaka_sid, msg)
         response = generate_response(msg, agent_role=tanaka_role,
                                      semvec_context=result.get("context", ""))
         tanaka_prev_response = response
