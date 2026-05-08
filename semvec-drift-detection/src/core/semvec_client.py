@@ -564,6 +564,30 @@ class SemvecClient:
         slot = self._get_engine(engine_id)
         return slot["engine"].get_statistics()
 
+    # ------------------------------------------------------------------
+    # Layer 6 — Token reduction (chat proxy with measured savings)
+
+    def create_chat_proxy(
+        self,
+        llm_call,
+        system_prompt: str = "You are a helpful assistant.",
+    ) -> "ChatProxyHandle":
+        """Open a Semvec-compressed chat session over a user-supplied LLM.
+
+        The proxy keeps its own private :class:`SemvecState` (separate
+        from the manager session pool) and compresses prior turns into
+        a fixed-size context block before each ``llm_call``. To get
+        meaningful ``pss_input_tokens`` your ``llm_call`` callable
+        should expose its prompt-token count via a ``last_usage`` dict
+        attribute (matches OpenAI's response shape).
+        """
+        from semvec.token_reduction import SemvecChatProxy
+        proxy = SemvecChatProxy(llm_call=llm_call, system_prompt=system_prompt)
+        return ChatProxyHandle(_proxy=proxy)
+
+    # ------------------------------------------------------------------
+    # Layer 1f — Behavioural-consistency probe
+
     def verify_consistency(
         self,
         session_id: str,
@@ -839,3 +863,34 @@ class SemvecClient:
         if region_id is None:
             return
         self._regions.publish_drift(cluster_id, region_id, drift_score, drift_phase)
+
+
+class ChatProxyHandle:
+    """Lightweight wrapper around :class:`SemvecChatProxy`.
+
+    Constructed via :meth:`SemvecClient.create_chat_proxy`. Each
+    :meth:`turn` returns a plain dict so callers do not have to import
+    :class:`semvec.token_reduction.TurnResult`.
+    """
+
+    __slots__ = ("_proxy",)
+
+    def __init__(self, *, _proxy):
+        self._proxy = _proxy
+
+    def turn(self, user_message: str) -> dict:
+        result = self._proxy.chat(user_message)
+        return {
+            "response": result.response,
+            "pss_input_tokens": result.pss_input_tokens,
+            "baseline_input_tokens": result.baseline_input_tokens,
+            "pss_prompt": result.pss_prompt,
+            "phase": result.phase,
+            "turn_number": result.turn_number,
+        }
+
+    def summary(self) -> dict:
+        return self._proxy.get_summary()
+
+    def print_report(self) -> None:
+        self._proxy.print_report()

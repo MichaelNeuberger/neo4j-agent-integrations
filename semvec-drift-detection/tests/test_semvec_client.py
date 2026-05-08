@@ -533,6 +533,85 @@ class TestFactExtraction:
             client.store_facts_as_entities("does-not-exist", "anything")
 
 
+class TestChatProxy:
+    """Wraps semvec.token_reduction.SemvecChatProxy.
+
+    The proxy compresses conversation history into a fixed-size context
+    block while transparently calling a user-supplied LLM. We verify
+    the handle returned by :meth:`SemvecClient.create_chat_proxy`
+    surfaces the per-turn shape (response, pss_input_tokens,
+    baseline_input_tokens, pss_prompt, phase, turn_number) and the
+    aggregate :meth:`summary`.
+    """
+
+    def _fake_llm(self):
+        responses: list[str] = []
+
+        def llm(messages: list) -> str:
+            responses.append(messages)
+            return f"answer-{len(responses)}"
+
+        return llm, responses
+
+    def test_create_chat_proxy_returns_handle(self, client):
+        llm, _ = self._fake_llm()
+        handle = client.create_chat_proxy(
+            llm_call=llm, system_prompt="You are a healthcare assistant.",
+        )
+        assert hasattr(handle, "turn")
+        assert hasattr(handle, "summary")
+
+    def test_turn_returns_required_keys(self, client):
+        llm, _ = self._fake_llm()
+        handle = client.create_chat_proxy(
+            llm_call=llm, system_prompt="You are a healthcare assistant.",
+        )
+        result = handle.turn("What treatment for James Morrison's diabetes?")
+        for key in (
+            "response", "pss_input_tokens", "baseline_input_tokens",
+            "pss_prompt", "phase", "turn_number",
+        ):
+            assert key in result, f"missing key {key!r}"
+        assert result["response"] == "answer-1"
+        assert result["turn_number"] == 1
+        assert isinstance(result["pss_prompt"], str)
+        assert isinstance(result["phase"], str)
+
+    def test_turn_increments_turn_number(self, client):
+        llm, _ = self._fake_llm()
+        handle = client.create_chat_proxy(llm_call=llm, system_prompt="…")
+        for i, q in enumerate([
+            "Question one", "Question two", "Question three",
+        ], start=1):
+            r = handle.turn(q)
+            assert r["turn_number"] == i
+
+    def test_summary_aggregates_turns(self, client):
+        llm, log = self._fake_llm()
+        handle = client.create_chat_proxy(llm_call=llm, system_prompt="…")
+        for q in ("a", "b", "c", "d"):
+            handle.turn(q)
+        summary = handle.summary()
+        assert summary["total_turns"] == 4
+        assert "per_turn" in summary
+        assert len(summary["per_turn"]) == 4
+        # The fake LLM does not expose `last_usage`, so token counts
+        # come back as None — that's the documented contract.
+        assert summary["total_pss_tokens"] is None or isinstance(
+            summary["total_pss_tokens"], int
+        )
+
+    def test_turn_passes_messages_to_llm_call(self, client):
+        llm, log = self._fake_llm()
+        handle = client.create_chat_proxy(llm_call=llm, system_prompt="HC system")
+        handle.turn("Hello")
+        assert log, "llm_call was not invoked"
+        messages = log[-1]
+        # Always at least system + user
+        assert any(m.role == "system" for m in messages)
+        assert any(m.role == "user" and m.content == "Hello" for m in messages)
+
+
 # ---------------------------------------------------------------------------
 # Layer 2 — Cluster
 
