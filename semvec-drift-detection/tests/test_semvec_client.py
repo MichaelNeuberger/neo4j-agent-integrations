@@ -162,6 +162,88 @@ class TestLayer1bSession:
         assert isinstance(result, dict)
 
 
+class TestSessionLifecycle:
+    """delete_session, reset_session — wraps SessionManager.delete_session/reset_session."""
+
+    def test_delete_session_removes_it(self, client):
+        first = client.run("init turn")
+        sid = first["session_id"]
+        result = client.delete_session(sid)
+        assert isinstance(result, dict)
+        assert result.get("deleted") is True
+        # Subsequent run on a deleted session must surface as a clear error.
+        with pytest.raises(ValueError):
+            client.run("follow-up", session_id=sid)
+
+    def test_delete_unknown_session_raises(self, client):
+        with pytest.raises(ValueError):
+            client.delete_session("does-not-exist")
+
+    def test_delete_cluster_backed_session_is_refused(self, client):
+        """Deleting a cluster's backing session would orphan the cluster."""
+        cluster = client.create_cluster(name="ward-test")
+        cid = cluster["cluster_id"]
+        with pytest.raises(ValueError, match="cluster"):
+            client.delete_session(cid)
+        # Cluster still exists and is usable
+        assert client.get_cluster(cid)["cluster_id"] == cid
+
+    def test_reset_session_keeps_session_alive(self, client):
+        # Build up state across several turns
+        first = client.run("Patient one — diabetes")
+        sid = first["session_id"]
+        for msg in (
+            "Patient one — Metformin",
+            "Patient one — Lisinopril",
+            "Patient one — Atorvastatin",
+        ):
+            client.run(msg, session_id=sid)
+        before_metrics = client.get_metrics(sid) if hasattr(client, "get_metrics") else None
+        result = client.reset_session(sid)
+        assert isinstance(result, dict)
+        assert result.get("reset") is True
+        # Session still works and starts a fresh similarity history
+        post = client.run("Patient one — fresh start", session_id=sid)
+        assert post["session_id"] == sid
+        # First turn after reset has top_similarity 0.0 because semantic_state is reset
+        assert post["top_similarity"] == 0.0
+
+    def test_reset_unknown_session_raises(self, client):
+        with pytest.raises(ValueError):
+            client.reset_session("does-not-exist")
+
+
+class TestTriggerLifecycle:
+    """clear_triggers, release_quarantine — inverse of add_trigger / set_isolation."""
+
+    def test_clear_triggers_drops_all(self, client):
+        first = client.run("Init")
+        sid = first["session_id"]
+        client.add_trigger(sid, "CRITICAL")
+        client.add_trigger(sid, "contraindication")
+
+        result = client.clear_triggers(sid)
+        assert isinstance(result, dict)
+        assert result.get("trigger_count") == 0
+
+    def test_clear_triggers_unknown_session_raises(self, client):
+        with pytest.raises(ValueError):
+            client.clear_triggers("does-not-exist")
+
+    def test_release_quarantine_returns_count(self, client):
+        first = client.run("Init")
+        sid = first["session_id"]
+        client.set_isolation(sid, level="QUARANTINE", similarity_threshold=0.5)
+        result = client.release_quarantine(sid)
+        assert isinstance(result, dict)
+        assert "released_count" in result
+        assert isinstance(result["released_count"], int)
+
+    def test_release_quarantine_unknown_session_raises(self, client):
+        with pytest.raises(ValueError):
+            client.release_quarantine("does-not-exist")
+
+
 # ---------------------------------------------------------------------------
 # Layer 2 — Cluster
 

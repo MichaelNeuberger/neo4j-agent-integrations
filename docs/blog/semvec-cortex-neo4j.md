@@ -11,6 +11,8 @@ All code in this post comes from two open repositories you can run locally:
 
 > The runtime now ships as the [`semvec`](https://pypi.org/project/semvec/) Python package. Earlier versions of this stack used a hosted REST API; that dependency is gone. There is no API key, no base URL, no network round-trip. Everything runs in your process.
 
+> **About `SemvecClient`.** Every code snippet below uses a class called `SemvecClient`. That class is **not** part of `pip install semvec` — it is a thin in-process façade defined in this repo at [`semvec-drift-detection/src/core/semvec_client.py`](https://github.com/MichaelNeuberger/neo4j-agent-integrations/blob/main/semvec-drift-detection/src/core/semvec_client.py). It composes `SessionManager`, `ClusterManager`, `RegionalManager`, `GlobalObserver`, and `NetworkManager` from `semvec.api.*` into one ergonomic surface that returns plain dicts. The PyPI package itself exports the underlying primitives (`SemvecState`, `SemvecConfig`, `MultiResolutionMemory`, `PhaseDetector`, `LiteralCache`, `ResonanceTrigger`, plus the exception hierarchy) — cloning the integrations repo is required for the client surface, the demo scenarios, and the persistence stores. A reader who runs `from semvec import SemvecClient` will get an `ImportError`; the symbol lives only in this repo.
+
 ---
 
 ## The memory illusion
@@ -565,9 +567,12 @@ The full domain schema, the six demo scenarios plus a Cypher explorer, and the 1
 Run the demo end-to-end with:
 
 ```bash
-cd semvec-drift-detection
+git clone https://github.com/MichaelNeuberger/neo4j-agent-integrations.git
+cd neo4j-agent-integrations/semvec-drift-detection
 python3 -m venv .venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
-cp .env.example .env  # fill in NEO4J_TEST_PASSWORD + OPENAI_*
+uv pip install -e ".[dev]"           # pulls semvec from PyPI + repo extras
+cp .env.example .env                   # fill in NEO4J_TEST_PASSWORD + OPENAI_*
 python scripts/interactive_demo.py
 ```
+
+`pip install semvec` alone does **not** include `SemvecClient`, the persistence stores, or the demo scenarios — those live in this repository.

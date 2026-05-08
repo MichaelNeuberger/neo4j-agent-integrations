@@ -277,6 +277,44 @@ class SemvecClient:
             raise ValueError(f"Session not found: {session_id}")
         return {"session_id": session_id, "trigger_count": count}
 
+    def clear_triggers(self, session_id: str) -> dict:
+        count = self._sessions.clear_triggers(session_id)
+        if count is None:
+            raise ValueError(f"Session not found: {session_id}")
+        return {"session_id": session_id, "trigger_count": count}
+
+    def release_quarantine(self, session_id: str) -> dict:
+        count = self._sessions.release_quarantine(session_id)
+        if count is None:
+            raise ValueError(f"Session not found: {session_id}")
+        return {"session_id": session_id, "released_count": count}
+
+    # ------------------------------------------------------------------
+    # Layer 1c — Session lifecycle (delete / reset)
+
+    def delete_session(self, session_id: str) -> dict:
+        """Drop a session from the in-process pool.
+
+        Refuses to delete a cluster's backing session (would orphan the
+        cluster). Use :meth:`delete_cluster` for that case.
+        """
+        if self._clusters.get_cluster(session_id) is not None:
+            raise ValueError(
+                f"Session {session_id} is the backing session of a cluster — "
+                "use delete_cluster() instead"
+            )
+        if self._sessions.get_session(session_id) is None:
+            raise ValueError(f"Session not found: {session_id}")
+        ok = self._sessions.delete_session(session_id)
+        return {"session_id": session_id, "deleted": bool(ok)}
+
+    def reset_session(self, session_id: str) -> dict:
+        """Wipe accumulated context but keep the session id and config."""
+        if self._sessions.get_session(session_id) is None:
+            raise ValueError(f"Session not found: {session_id}")
+        ok = self._sessions.reset_session(session_id)
+        return {"session_id": session_id, "reset": bool(ok)}
+
     # ------------------------------------------------------------------
     # Layer 2 — Cluster
 
