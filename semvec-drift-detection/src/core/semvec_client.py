@@ -316,6 +316,79 @@ class SemvecClient:
         return {"session_id": session_id, "reset": bool(ok)}
 
     # ------------------------------------------------------------------
+    # Layer 1d — Metrics, memory recall, consistency probe
+
+    def get_session_metrics(self, session_id: str) -> dict:
+        """Return phase, FSM and history arrays for the session.
+
+        Mirrors :meth:`SessionManager.get_metrics` and includes
+        ``session_id`` for caller convenience. Raises ``ValueError``
+        when the session is not in the pool.
+        """
+        metrics = self._sessions.get_metrics(session_id)
+        if metrics is None:
+            raise ValueError(f"Session not found: {session_id}")
+        return {"session_id": session_id, **metrics}
+
+    def get_relevant_memories(
+        self,
+        session_id: str,
+        top_k: int = 5,
+        max_text_chars: int = 500,
+        full_first: bool = False,
+    ) -> list[dict]:
+        """Top-K memories ranked against the session's current state.
+
+        Each entry carries ``text``, ``relevance``, ``memory_hash`` and
+        ``truncated``. Pass ``full_first=True`` to keep the highest
+        ranked memory un-truncated regardless of ``max_text_chars``.
+        """
+        if self._sessions.get_session(session_id) is None:
+            raise ValueError(f"Session not found: {session_id}")
+        result = self._sessions.get_context(
+            session_id,
+            top_k=top_k,
+            full_first=full_first,
+            max_text_chars=max_text_chars,
+        )
+        return list(result or [])
+
+    def get_memory_by_hash(self, session_id: str, memory_hash: str) -> Optional[dict]:
+        """Expand a single memory previously seen via
+        :meth:`get_relevant_memories`. Returns ``None`` if the hash is
+        unknown to the session; raises ``ValueError`` if the session
+        itself is not in the pool.
+        """
+        if self._sessions.get_session(session_id) is None:
+            raise ValueError(f"Session not found: {session_id}")
+        return self._sessions.get_memory_by_hash(session_id, memory_hash)
+
+    def verify_consistency(
+        self,
+        session_id: str,
+        test_embeddings: list[list[float]],
+        reference_session_id: Optional[str] = None,
+        tolerance: float = 1e-3,
+    ) -> bool:
+        """Behavioural-consistency probe.
+
+        Runs each ``test_embedding`` through the session (and an
+        optional reference session) and returns True iff the cosine
+        similarities match within ``tolerance``. Useful after
+        ``import_session`` to confirm semantic equivalence beyond a
+        bare checksum match.
+        """
+        result = self._sessions.verify_consistency(
+            session_id,
+            test_embeddings=test_embeddings,
+            reference_session_id=reference_session_id,
+            tolerance=tolerance,
+        )
+        if result is None:
+            raise ValueError(f"Session not found: {session_id}")
+        return bool(result)
+
+    # ------------------------------------------------------------------
     # Layer 2 — Cluster
 
     def create_cluster(

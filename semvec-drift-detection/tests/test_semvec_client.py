@@ -244,6 +244,138 @@ class TestTriggerLifecycle:
             client.release_quarantine("does-not-exist")
 
 
+class TestSessionMetrics:
+    """get_session_metrics — wraps SessionManager.get_metrics."""
+
+    def test_metrics_returns_required_keys(self, client):
+        first = client.run("Patient diabetes intake")
+        sid = first["session_id"]
+        for q in ("Metformin contraindications", "Lisinopril interactions"):
+            client.run(q, session_id=sid, response="(stub)")
+        m = client.get_session_metrics(sid)
+        for key in (
+            "session_id", "phase", "interaction_count", "total_memories",
+            "beta_history", "similarity_history",
+            "fsm_history", "norm_history", "phase_history",
+        ):
+            assert key in m, f"missing key {key!r}"
+        assert m["session_id"] == sid
+
+    def test_metrics_grow_with_turns(self, client):
+        first = client.run("turn 0")
+        sid = first["session_id"]
+        m0 = client.get_session_metrics(sid)
+        for i in range(3):
+            client.run(f"turn {i + 1}", session_id=sid, response="(stub)")
+        m1 = client.get_session_metrics(sid)
+        assert m1["interaction_count"] >= m0["interaction_count"]
+        assert len(m1["similarity_history"]) >= len(m0["similarity_history"])
+
+    def test_phase_history_is_string_list(self, client):
+        first = client.run("seed")
+        sid = first["session_id"]
+        m = client.get_session_metrics(sid)
+        assert isinstance(m["phase_history"], list)
+        for entry in m["phase_history"]:
+            assert isinstance(entry, str)
+
+    def test_metrics_unknown_session_raises(self, client):
+        with pytest.raises(ValueError):
+            client.get_session_metrics("does-not-exist")
+
+
+class TestMemoryRecall:
+    """get_relevant_memories + get_memory_by_hash — wraps
+    SessionManager.get_context / get_memory_by_hash."""
+
+    @pytest.fixture
+    def warmed_session(self, client):
+        first = client.run("Patient with chest pain — initial workup")
+        sid = first["session_id"]
+        for q, a in [
+            ("Metformin dosage check",   "Metformin 500mg BID, hold if GFR < 30."),
+            ("Lisinopril titration",     "Start Lisinopril 5mg, titrate to 10mg."),
+            ("Atorvastatin LDL goal",    "Atorvastatin 40mg, target LDL < 70."),
+            ("Insulin regimen review",   "Basal insulin 10 units, adjust per CGM."),
+        ]:
+            r = client.run(q, session_id=sid, response=a)
+            sid = r["session_id"]
+        return sid
+
+    def test_returns_list_of_entries(self, client, warmed_session):
+        out = client.get_relevant_memories(warmed_session, top_k=3)
+        assert isinstance(out, list)
+        assert 1 <= len(out) <= 3
+
+    def test_entry_has_hash_relevance_text(self, client, warmed_session):
+        out = client.get_relevant_memories(warmed_session, top_k=3)
+        assert out, "expected at least one memory"
+        for entry in out:
+            assert {"text", "relevance", "memory_hash", "truncated"} <= entry.keys()
+            assert isinstance(entry["text"], str)
+            assert isinstance(entry["relevance"], float)
+            assert isinstance(entry["memory_hash"], str)
+            assert isinstance(entry["truncated"], bool)
+
+    def test_full_first_keeps_top_untruncated(self, client, warmed_session):
+        out = client.get_relevant_memories(
+            warmed_session, top_k=3, max_text_chars=10, full_first=True,
+        )
+        assert out, "expected at least one memory"
+        # First entry must not be flagged as truncated
+        assert out[0]["truncated"] is False
+
+    def test_unknown_session_raises(self, client):
+        with pytest.raises(ValueError):
+            client.get_relevant_memories("does-not-exist")
+
+    def test_get_memory_by_hash_round_trip(self, client, warmed_session):
+        listed = client.get_relevant_memories(warmed_session, top_k=3)
+        # Find first entry with a non-empty hash; older memories may
+        # surface without a stable hash, so be tolerant.
+        candidate = next((e for e in listed if e["memory_hash"]), None)
+        if candidate is None:
+            pytest.skip("no memory with stable semantic_hash on this turn")
+        full = client.get_memory_by_hash(warmed_session, candidate["memory_hash"])
+        assert full is not None
+        assert full["memory_hash"] == candidate["memory_hash"]
+        assert isinstance(full["text"], str) and full["text"]
+
+    def test_get_memory_by_hash_unknown_returns_none(self, client, warmed_session):
+        result = client.get_memory_by_hash(warmed_session, "definitely-not-a-real-hash")
+        assert result is None
+
+    def test_get_memory_by_hash_unknown_session_raises(self, client):
+        with pytest.raises(ValueError):
+            client.get_memory_by_hash("does-not-exist", "any-hash")
+
+
+class TestVerifyConsistency:
+    """verify_consistency — wraps SessionManager.verify_consistency.
+
+    The upstream method runs each test embedding through the session and
+    a reference session and returns True iff cosine similarities match
+    within ``tolerance``. We test both the self-consistent case and
+    the unknown-session error path.
+    """
+
+    def test_returns_bool_for_known_session(self, client):
+        first = client.run("Init")
+        sid = first["session_id"]
+        emb = HashEmbedder(dimension=16)
+        probes = [
+            list(emb.get_embedding("Patient one").astype(float)),
+            list(emb.get_embedding("Patient two").astype(float)),
+            list(emb.get_embedding("Patient three").astype(float)),
+        ]
+        result = client.verify_consistency(sid, probes)
+        assert isinstance(result, bool)
+
+    def test_unknown_session_raises(self, client):
+        with pytest.raises(ValueError):
+            client.verify_consistency("does-not-exist", [[0.0] * 16])
+
+
 # ---------------------------------------------------------------------------
 # Layer 2 — Cluster
 
