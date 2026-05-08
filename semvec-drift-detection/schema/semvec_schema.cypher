@@ -44,14 +44,14 @@ CREATE CONSTRAINT anomaly_event_unique IF NOT EXISTS
 CREATE VECTOR INDEX semantic_state_vector IF NOT EXISTS
   FOR (s:SemanticState) ON (s.vector)
   OPTIONS {indexConfig: {
-    `vector.dimensions`: 384,
+    `vector.dimensions`: 768,
     `vector.similarity_function`: 'cosine'
   }};
 
 CREATE VECTOR INDEX memory_content_vector IF NOT EXISTS
   FOR (m:Memory) ON (m.content_vector)
   OPTIONS {indexConfig: {
-    `vector.dimensions`: 384,
+    `vector.dimensions`: 768,
     `vector.similarity_function`: 'cosine'
   }};
 
@@ -82,3 +82,36 @@ CREATE INDEX memory_tier_importance IF NOT EXISTS
 
 CREATE INDEX agent_session_status IF NOT EXISTS
   FOR (s:AgentSession) ON (s.status, s.last_active);
+
+// === Phase 3: literal facts + cortex consensus ===
+//
+// LiteralFact mirrors entries written via SemvecClient.store_facts_as_entities;
+// each session may store the same fact key only once (the upstream literal
+// cache de-duplicates on key, this constraint pins the same property at
+// the graph layer for clients that mirror facts into Neo4j).
+
+CREATE CONSTRAINT literal_fact_unique IF NOT EXISTS
+  FOR (f:LiteralFact) REQUIRE (f.session_id, f.key) IS UNIQUE;
+
+CREATE INDEX literal_fact_kind IF NOT EXISTS
+  FOR (f:LiteralFact) ON (f.kind);
+
+CREATE INDEX literal_fact_created IF NOT EXISTS
+  FOR (f:LiteralFact) ON (f.created_at);
+
+// ConsensusEngine + ConsensusProposal + ConsensusVote let downstream code
+// mirror SemvecClient.create_consensus_engine / submit_consensus_proposal /
+// vote_on_consensus into the graph for audit. Memory nodes already cover
+// the per-vote payload; these constraints just guarantee unique IDs.
+
+CREATE CONSTRAINT consensus_engine_unique IF NOT EXISTS
+  FOR (e:ConsensusEngine) REQUIRE e.engine_id IS UNIQUE;
+
+CREATE CONSTRAINT consensus_proposal_unique IF NOT EXISTS
+  FOR (p:ConsensusProposal) REQUIRE p.proposal_id IS UNIQUE;
+
+CREATE INDEX consensus_proposal_status IF NOT EXISTS
+  FOR (p:ConsensusProposal) ON (p.status, p.created_at);
+
+CREATE INDEX consensus_vote_recorded IF NOT EXISTS
+  FOR (v:ConsensusVote) ON (v.recorded_at);

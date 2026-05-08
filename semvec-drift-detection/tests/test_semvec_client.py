@@ -376,6 +376,163 @@ class TestVerifyConsistency:
             client.verify_consistency("does-not-exist", [[0.0] * 16])
 
 
+class TestConsensusEngine:
+    """Wraps semvec.cortex.ConsensusEngine.
+
+    Lifecycle: create_consensus_engine -> register_consensus_voter ->
+    submit_consensus_proposal -> vote_on_consensus -> evaluate_consensus.
+    """
+
+    def test_create_engine_returns_engine_id(self, client):
+        eng = client.create_consensus_engine(
+            local_id="orchestrator", network_id="ward-net",
+        )
+        assert "engine_id" in eng
+        assert eng["local"] == "orchestrator"
+        assert eng["network"] == "ward-net"
+        assert eng["level"] == "qualified_majority"   # default
+
+    def test_register_voters_and_submit_proposal(self, client):
+        eng = client.create_consensus_engine("orch", "net")
+        eid = eng["engine_id"]
+        for inst, w in [("dr-chen", 1.0), ("dr-volkov", 1.0), ("dr-tanaka", 1.5)]:
+            r = client.register_consensus_voter(eid, inst, weight=w)
+            assert r.get("registered") is True
+            assert r["instance_id"] == inst
+
+        proposal = client.submit_consensus_proposal(
+            eid,
+            proposal_type="treatment_alignment",
+            proposed_state=[0.0] * 8,
+            rationale="Park requires LVH workup",
+        )
+        assert "proposal_id" in proposal
+        assert proposal["status"] == "pending"
+
+    def test_vote_and_evaluate_simple_majority_passes(self, client):
+        eng = client.create_consensus_engine("orch", "net", level="simple_majority")
+        eid = eng["engine_id"]
+        for inst in ("a", "b", "c"):
+            client.register_consensus_voter(eid, inst)
+        prop = client.submit_consensus_proposal(
+            eid, proposal_type="x", proposed_state=[0.0] * 4, rationale="r",
+        )
+        pid = prop["proposal_id"]
+        client.vote_on_consensus(eid, pid, True, voting_instance="a")
+        client.vote_on_consensus(eid, pid, True, voting_instance="b")
+        client.vote_on_consensus(eid, pid, False, voting_instance="c")
+        result = client.evaluate_consensus(eid, pid)
+        assert result["accepted"] is True
+        assert result["status"] == "accepted"
+        assert "ratio" in result
+
+    def test_vote_and_evaluate_unanimous_fails_on_dissent(self, client):
+        eng = client.create_consensus_engine("orch", "net", level="unanimous")
+        eid = eng["engine_id"]
+        for inst in ("a", "b", "c"):
+            client.register_consensus_voter(eid, inst)
+        prop = client.submit_consensus_proposal(
+            eid, proposal_type="x", proposed_state=[0.0] * 4, rationale="r",
+        )
+        pid = prop["proposal_id"]
+        client.vote_on_consensus(eid, pid, True, voting_instance="a")
+        client.vote_on_consensus(eid, pid, True, voting_instance="b")
+        client.vote_on_consensus(eid, pid, False, voting_instance="c")
+        result = client.evaluate_consensus(eid, pid)
+        assert result["accepted"] is False
+        assert result["status"] == "pending"
+
+    def test_unknown_engine_raises(self, client):
+        with pytest.raises(ValueError):
+            client.register_consensus_voter("does-not-exist", "voter-1")
+        with pytest.raises(ValueError):
+            client.submit_consensus_proposal(
+                "does-not-exist", proposal_type="x",
+                proposed_state=[0.0] * 4, rationale="r",
+            )
+        with pytest.raises(ValueError):
+            client.evaluate_consensus("does-not-exist", "proposal-1")
+
+    def test_unknown_proposal_raises(self, client):
+        eng = client.create_consensus_engine("orch", "net")
+        with pytest.raises(ValueError):
+            client.evaluate_consensus(eng["engine_id"], "no-such-proposal")
+
+    def test_invalid_level_rejected(self, client):
+        with pytest.raises(ValueError):
+            client.create_consensus_engine("o", "n", level="banana_majority")
+
+    def test_get_consensus_statistics(self, client):
+        eng = client.create_consensus_engine("orch", "net")
+        eid = eng["engine_id"]
+        client.register_consensus_voter(eid, "a")
+        client.register_consensus_voter(eid, "b")
+        stats = client.get_consensus_statistics(eid)
+        assert stats["known_instances"] == 2
+        assert stats["network_id"] == "net"
+
+
+class TestFactExtraction:
+    """Wraps semvec.compliance.extractors.extract_facts.
+
+    Healthcare context: chemotherapy schedule strings carry dosages,
+    schedule dates, and identifiers that must survive embedding
+    compression. The extractor recognises ISO/DE dates, EUR/USD/kg/%
+    numerics with units, plus UUID/IBAN/DE-VAT identifiers (medical
+    domain extensions are not in upstream — store them via
+    inject_memory or a domain-specific helper).
+    """
+
+    def test_extract_iso_date(self, client):
+        facts = client.extract_facts(
+            "First infusion 2026-05-15. Repeat every 21 days."
+        )
+        date_facts = [f for f in facts if f["kind"] == "date"]
+        assert len(date_facts) >= 1
+        assert "2026-05-15" in date_facts[0]["raw"]
+
+    def test_extract_de_date(self, client):
+        facts = client.extract_facts(
+            "Aufnahme am 08.05.2026 zur Routinekontrolle."
+        )
+        date_facts = [f for f in facts if f["kind"] == "date"]
+        assert len(date_facts) >= 1
+
+    def test_extract_currency_amount(self, client):
+        facts = client.extract_facts(
+            "Treatment plan estimate 1.250,00 EUR per cycle."
+        )
+        num_facts = [f for f in facts if f["kind"] == "numeric"]
+        assert len(num_facts) >= 1
+        assert num_facts[0]["unit"] == "EUR"
+
+    def test_extract_iban_identifier(self, client):
+        # Valid IBAN (mod-97 == 1)
+        facts = client.extract_facts(
+            "Reimbursement account DE89 3704 0044 0532 0130 00."
+        )
+        id_facts = [f for f in facts if f["kind"] == "identifier"]
+        assert any(f.get("id_type") == "iban" for f in id_facts)
+
+    def test_no_facts_returns_empty(self, client):
+        assert client.extract_facts("Patient asks about side effects.") == []
+
+    def test_store_facts_as_entities_returns_count(self, client):
+        first = client.run("init")
+        sid = first["session_id"]
+        text = "Carlos starts therapy on 2026-05-15. Cost 4.500,00 EUR."
+        result = client.store_facts_as_entities(sid, text)
+        assert "stored" in result
+        assert result["stored"] >= 2  # 1 date + 1 currency
+        # Entities are queryable on the session
+        count = client._sessions.get_entity_count(sid)
+        assert count >= result["stored"]
+
+    def test_store_facts_unknown_session_raises(self, client):
+        with pytest.raises(ValueError):
+            client.store_facts_as_entities("does-not-exist", "anything")
+
+
 # ---------------------------------------------------------------------------
 # Layer 2 — Cluster
 

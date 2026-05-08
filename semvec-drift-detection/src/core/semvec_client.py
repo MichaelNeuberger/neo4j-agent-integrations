@@ -363,6 +363,207 @@ class SemvecClient:
             raise ValueError(f"Session not found: {session_id}")
         return self._sessions.get_memory_by_hash(session_id, memory_hash)
 
+    # ------------------------------------------------------------------
+    # Layer 1e — Compliance helpers (verbatim fact extraction)
+
+    def extract_facts(self, text: str) -> list[dict]:
+        """Pull verbatim numeric/date/identifier facts out of *text*.
+
+        Wraps :func:`semvec.compliance.extractors.extract_facts`. The
+        upstream extractor is intentionally narrow: ISO/DE/US dates,
+        EUR/USD plus a small unit whitelist (``kg``, ``kWh``, ``%`` …),
+        and UUID/IBAN/DE-VAT identifiers. Medical-specific units like
+        ``mg/m²`` or MRNs are not in the whitelist — store those via
+        :meth:`inject_memory` instead.
+        """
+        from semvec.compliance.extractors import extract_facts as _extract
+        out: list[dict] = []
+        for fact in _extract(text):
+            entry: dict = {
+                "kind": fact.kind,
+                "raw": fact.raw,
+                "start": int(fact.start),
+                "end": int(fact.end),
+            }
+            if fact.kind == "numeric":
+                entry["value"] = str(fact.value)   # Decimal → str (json-safe)
+                entry["unit"] = fact.unit
+            elif fact.kind == "date":
+                entry["value"] = fact.value.isoformat()
+            elif fact.kind == "identifier":
+                entry["value"] = fact.value
+                entry["id_type"] = fact.id_type
+            out.append(entry)
+        return out
+
+    def store_facts_as_entities(self, session_id: str, text: str) -> dict:
+        """Extract facts from *text* and store each one as a literal-cache
+        entity on the session. Returns ``{"stored": int}``.
+
+        Fact kinds (``numeric``/``date``/``identifier``) are mapped to
+        the upstream literal-cache kind ``"constant"`` because that is
+        the closest semantic match in
+        :class:`semvec._core.EntityKind` — and ``store_entity`` rejects
+        anything outside its whitelist. The original fact ``kind`` is
+        preserved in the entity ``context`` (``kind=numeric; …``) so
+        downstream queries can still tell facts apart.
+        """
+        if self._sessions.get_session(session_id) is None:
+            raise ValueError(f"Session not found: {session_id}")
+        from semvec.compliance.extractors import extract_facts as _extract
+        stored = 0
+        for fact in _extract(text):
+            entity = fact.to_code_entity()
+            context = f"kind={fact.kind}; {entity.context}"
+            ok = self._sessions.store_entity(
+                session_id,
+                key=entity.key,
+                kind="constant",
+                value=entity.value,
+                context=context,
+                importance=1.0,
+            )
+            if ok is not None:
+                stored += 1
+        return {"session_id": session_id, "stored": stored}
+
+    # ------------------------------------------------------------------
+    # Layer 2c — Cortex consensus engine
+
+    _VALID_CONSENSUS_LEVELS = (
+        "simple_majority",
+        "qualified_majority",
+        "unanimous",
+        "weighted_vote",
+        "adaptive_threshold",
+    )
+
+    def _resolve_consensus_level(self, level: str):
+        from semvec.cortex import ConsensusLevel
+        if level not in self._VALID_CONSENSUS_LEVELS:
+            raise ValueError(
+                f"level must be one of {self._VALID_CONSENSUS_LEVELS!r}, got {level!r}"
+            )
+        return ConsensusLevel(level)
+
+    def _ensure_consensus_engines(self):
+        if not hasattr(self, "_consensus_engines"):
+            self._consensus_engines: dict[str, dict] = {}
+
+    def create_consensus_engine(
+        self,
+        local_id: str,
+        network_id: str,
+        level: str = "qualified_majority",
+    ) -> dict:
+        from semvec.cortex import ConsensusEngine
+        # Validate level eagerly so callers get a clean error.
+        default_level = self._resolve_consensus_level(level)
+        engine = ConsensusEngine(local_id, network_id)
+        self._ensure_consensus_engines()
+        self._consensus_engines[engine.consensus_id] = {
+            "engine": engine,
+            "default_level": default_level,
+            # The Rust-backed engine doesn't expose its proposal store
+            # via Python attributes, so we track the proposals returned
+            # by create_proposal here for later evaluate_consensus calls.
+            "proposals": {},
+        }
+        return {
+            "engine_id": engine.consensus_id,
+            "local": local_id,
+            "network": network_id,
+            "level": level,
+        }
+
+    def _get_engine(self, engine_id: str):
+        self._ensure_consensus_engines()
+        slot = self._consensus_engines.get(engine_id)
+        if slot is None:
+            raise ValueError(f"Consensus engine not found: {engine_id}")
+        return slot
+
+    def register_consensus_voter(
+        self, engine_id: str, instance_id: str, weight: float = 1.0,
+    ) -> dict:
+        slot = self._get_engine(engine_id)
+        slot["engine"].register_instance(instance_id, weight=weight)
+        return {
+            "engine_id": engine_id,
+            "instance_id": instance_id,
+            "weight": float(weight),
+            "registered": True,
+        }
+
+    def submit_consensus_proposal(
+        self,
+        engine_id: str,
+        proposal_type: str,
+        proposed_state: list[float],
+        rationale: str,
+        level: Optional[str] = None,
+        voting_timeout: float = 300.0,
+    ) -> dict:
+        import numpy as np
+        slot = self._get_engine(engine_id)
+        cl = (
+            self._resolve_consensus_level(level)
+            if level is not None
+            else slot["default_level"]
+        )
+        prop = slot["engine"].create_proposal(
+            proposal_type,
+            proposed_state=np.asarray(proposed_state, dtype=np.float64),
+            rationale=rationale,
+            consensus_level=cl,
+            voting_timeout=voting_timeout,
+        )
+        slot["proposals"][prop.proposal_id] = prop
+        return {
+            "engine_id": engine_id,
+            "proposal_id": prop.proposal_id,
+            "status": prop.status,
+            "voting_deadline": prop.voting_deadline,
+        }
+
+    def vote_on_consensus(
+        self,
+        engine_id: str,
+        proposal_id: str,
+        vote: bool,
+        voting_instance: Optional[str] = None,
+    ) -> dict:
+        slot = self._get_engine(engine_id)
+        recorded = slot["engine"].vote_on_proposal(
+            proposal_id, bool(vote), voting_instance=voting_instance,
+        )
+        return {
+            "engine_id": engine_id,
+            "proposal_id": proposal_id,
+            "voting_instance": voting_instance,
+            "recorded": bool(recorded),
+        }
+
+    def evaluate_consensus(self, engine_id: str, proposal_id: str) -> dict:
+        slot = self._get_engine(engine_id)
+        proposal = slot["proposals"].get(proposal_id)
+        if proposal is None:
+            raise ValueError(f"Proposal not found: {proposal_id}")
+        accepted, ratio = proposal.calculate_consensus()
+        return {
+            "engine_id": engine_id,
+            "proposal_id": proposal_id,
+            "accepted": bool(accepted),
+            "ratio": float(ratio),
+            "status": proposal.status,
+            "votes_for": int(sum(1 for v in proposal.votes.values() if v)),
+            "votes_against": int(sum(1 for v in proposal.votes.values() if not v)),
+        }
+
+    def get_consensus_statistics(self, engine_id: str) -> dict:
+        slot = self._get_engine(engine_id)
+        return slot["engine"].get_statistics()
+
     def verify_consistency(
         self,
         session_id: str,
