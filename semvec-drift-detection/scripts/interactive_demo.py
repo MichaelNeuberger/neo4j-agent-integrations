@@ -423,18 +423,44 @@ def record_investigated(
         db.run(cypher, **params).consume()
 
 
-# ── Scenario 1: Live Drift Detection ────────────────────────────────────
+# ── Scenario 1: Live Drift + Token Savings ─────────────────────────────
 
 def scenario_live_drift(mcp: SemvecMCPServer, driver):
-    header("Scenario 1: Live Drift Detection")
-    print("  Type messages and watch Semvec compute drift + Neo4j persist the state chain.")
+    header("Scenario 1: Live Drift + Token Savings")
+    print("  Each turn shows two things side by side:")
+    print(f"    - {BOLD}Drift{RESET}: similarity, drift score, Semvec phase, Neo4j state chain")
+    print(f"    - {BOLD}Token savings{RESET}: PSS-compressed prompt vs naïve full-history baseline")
+    print(f"  This scenario {BOLD}requires{RESET} a working LLM endpoint (OPENAI_BASE_URL + OPENAI_API_KEY).")
     print(f"  Type {BOLD}'quit'{RESET} to return to menu.\n")
+
+    if not USE_LLM:
+        print(f"  {RED}This scenario needs the LLM. Restart without --no-llm.{RESET}")
+        return
+
+    # Hard pre-flight: surface a clear error before the user types anything
+    # if the LLM endpoint is down. No silent fallback to placeholder text —
+    # the whole point of Scenario 1 is the live LLM round-trip.
+    print(f"  {DIM}…{RESET} probing LLM endpoint at {os.environ['OPENAI_BASE_URL']} …", flush=True)
+    try:
+        probe = get_llm().respond("Say OK", max_tokens=8)
+        if not probe:
+            raise RuntimeError("LLM returned an empty response")
+    except Exception as e:
+        print()
+        print(f"  {RED}{BOLD}LLM endpoint unreachable.{RESET}")
+        print(f"  {RED}Reason:{RESET} {e}")
+        print(f"  {DIM}OPENAI_BASE_URL = {os.environ['OPENAI_BASE_URL']}{RESET}")
+        print(f"  {DIM}OPENAI_MODEL    = {os.environ['OPENAI_MODEL']}{RESET}")
+        print(f"  {DIM}Check the value in .env and that the endpoint is reachable.{RESET}")
+        print(f"  {YELLOW}Scenario 1 aborted. Pick another scenario or fix .env and restart.{RESET}")
+        return
+    print(f"  {GREEN}LLM ready.{RESET} ({os.environ['OPENAI_MODEL']})\n")
 
     session = mcp.create_agent_session(agent_id=f"interactive-{int(time.time())}")
     sid = session["session_id"]
     info("Session", sid)
     info("Agent", session["agent_id"])
-    info("LLM", f"{GREEN}enabled{RESET} ({os.environ['OPENAI_MODEL']})" if USE_LLM else f"{DIM}off (use --llm){RESET}")
+    info("LLM", f"{GREEN}enabled{RESET} ({os.environ['OPENAI_MODEL']})")
     print()
 
     # Live token-savings panel: compare the prompt size Semvec would
@@ -464,27 +490,44 @@ def scenario_live_drift(mcp: SemvecMCPServer, driver):
         phase = result["drift_phase"]
         detected = _is_drift(result)
 
-        # Generate agent response (real LLM or placeholder)
+        # Generate agent response — real LLM, no fallback. If the call
+        # fails mid-loop we surface the error immediately and break so
+        # the user sees the failure, not a placeholder string.
         t1 = time.time()
-        response = generate_response(msg, semvec_context=result.get("context", ""))
+        try:
+            response = get_llm().respond(
+                msg,
+                system_prompt="You are a helpful assistant. Answer concisely in 2-3 sentences.",
+                context=result.get("context", ""),
+            )
+        except Exception as e:
+            print()
+            print(f"  {RED}{BOLD}LLM call failed at step {step}.{RESET}")
+            print(f"  {RED}Reason:{RESET} {e}")
+            print(f"  {YELLOW}Scenario 1 aborted; the session up to here is in Neo4j.{RESET}")
+            break
         llm_latency = (time.time() - t1) * 1000
 
         # Teach Semvec the response
         mcp.store_response(sid, response)
 
         print()
-        if USE_LLM:
-            print(f"  {GREEN}Agent:{RESET} {textwrap.fill(response, 72, subsequent_indent='         ')}")
-            print()
+        print(f"  {GREEN}Agent:{RESET} {textwrap.fill(response, 72, subsequent_indent='         ')}")
+        print()
         info("Similarity", f"{sim:.3f}  {bar(sim)}")
         info("Drift Score", f"{drift_score:.3f}")
         info("Phase", color_phase(phase))
         info("Drift Detected", f"{RED}YES{RESET}" if detected else f"{GREEN}no{RESET}")
         info("Context (Semvec)", textwrap.shorten(result["context"], 80) if result["context"] else "(empty)")
         info("Neo4j State", f"#{result['step']}  (id: {result['state_id'][:12]}...)")
-        info("Latency", f"Semvec {semvec_latency:.0f}ms" + (f" + LLM {llm_latency:.0f}ms" if USE_LLM else ""))
+        info("Latency", f"Semvec {semvec_latency:.0f}ms + LLM {llm_latency:.0f}ms")
 
-        # Token-savings accounting for this turn
+        # Token-savings accounting for this turn. The PSS context block
+        # carries a small constant header — early turns can cost slightly
+        # MORE than the naïve baseline. The compression pays off as soon
+        # as the conversation has enough history that replaying it costs
+        # more than the compressed context. The cumulative panel below
+        # shows the cross-over.
         pss_prompt = (
             f"{SYS_PROMPT}\n\nContext:\n{result.get('context', '')}\n\n"
             f"User: {msg}"
@@ -498,8 +541,30 @@ def scenario_live_drift(mcp: SemvecMCPServer, driver):
             base_t = estimate_tokens(baseline_prompt)
             pss_token_total += pss_t
             baseline_token_total += base_t
-            saving = ((base_t - pss_t) / base_t * 100) if base_t else 0.0
-            info("Tokens", f"PSS {pss_t}  baseline {base_t}  ({saving:+.1f}%)")
+            delta = pss_t - base_t
+            arrow = f"{RED}+{delta}{RESET}" if delta > 0 else f"{GREEN}{delta}{RESET}"
+            info(
+                "Tokens (this turn)",
+                f"PSS {pss_t}  baseline {base_t}  (Δ {arrow})",
+            )
+            # Memory tier metric — context stays linear until the
+            # short-term tier (default 15) starts evicting older
+            # entries, after which PSS plateaus while baseline keeps
+            # growing. The cross-over typically happens around turn
+            # 15-25 depending on message length.
+            try:
+                semvec_client = _build_semvec_client()
+                # mcp.detect_drift uses its own internal session id;
+                # we have to ask the detector for the matched semvec
+                # session.
+                semvec_sid = mcp._detector.get_semvec_session_id(sid)
+                if semvec_sid:
+                    m = semvec_client.get_session_metrics(semvec_sid).get(
+                        "total_memories", "?"
+                    )
+                    info("Memories", f"{m}  (cross-over near tier limit ~15)")
+            except Exception:
+                pass
         except RuntimeError:
             pass  # tiktoken not available — silently skip the panel
         chat_history.append(("user", msg))
@@ -521,11 +586,20 @@ def scenario_live_drift(mcp: SemvecMCPServer, driver):
     info("Drift Events", str(summary.get("total_drift_events", 0)))
     if baseline_token_total:
         saving_total = (baseline_token_total - pss_token_total) / baseline_token_total * 100
+        if saving_total > 0:
+            label = f"{GREEN}{saving_total:.1f}% saved{RESET}"
+        else:
+            label = f"{YELLOW}PSS used {abs(saving_total):.1f}% MORE (overhead phase){RESET}"
         info(
             "Tokens (cumulative)",
-            f"PSS {pss_token_total}  baseline {baseline_token_total}  "
-            f"({saving_total:+.1f}% saved)",
+            f"PSS {pss_token_total}  baseline {baseline_token_total}  ({label})",
         )
+        if saving_total <= 0:
+            print(
+                f"  {DIM}Note: {step} turn(s) is below the short-term tier limit (default 15). "
+                f"PSS context grows until the tier fills, then plateaus while baseline keeps "
+                f"growing — keep the conversation going to see the cross-over.{RESET}"
+            )
 
 
 # ── Scenario 2: Topic Switch Detection ──────────────────────────────────
@@ -2451,7 +2525,7 @@ def main():
     info("Neo4j Browser", f"http://localhost:7474")
 
     scenarios = {
-        "1": ("Live Drift Detection — type messages, watch drift in real-time", scenario_live_drift),
+        "1": ("Live Drift + Token Savings — type messages, watch drift AND PSS-vs-baseline tokens per turn (LLM required)", scenario_live_drift),
         "2": ("Drift + Short-Circuit — Morrison diabetes → Patel psychiatry → Rodriguez cardiology → paraphrase HITs", scenario_topic_switch),
         "3": ("Ward Round Cluster — Dr. Chen/Volkov/Tanaka on David Park (Semvec Layer 2 Clusters)", scenario_ward_round),
         "4": ("Medication Safety Guard — Gutierrez chemo, anchors/triggers/isolation (Semvec Layer 1b)", scenario_medication_safety),
