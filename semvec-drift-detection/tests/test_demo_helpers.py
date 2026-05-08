@@ -12,7 +12,7 @@ import re
 
 import pytest
 
-from scripts.demo_helpers import sim_bar
+from scripts.demo_helpers import format_observer_sample, sim_bar
 
 
 @pytest.fixture(autouse=True)
@@ -96,3 +96,72 @@ class TestSimBarColours:
         bar = sim_bar(0.2)
         assert "\x1b[31m" in bar
         assert "\x1b[33m" not in bar
+
+
+class TestFormatObserverSample:
+    """The observer's sample() returns a Unix-epoch float plus useful counts.
+
+    The first iteration of the demo printed ``sampled_at`` raw, which surfaces
+    as e.g. ``1714572345.612`` — readable for nobody. ``new_anomalies`` and
+    ``clusters_sampled`` were silently discarded even though they are what
+    makes the sample meaningful in the demo.
+    """
+
+    def test_formats_unix_epoch_as_iso(self):
+        # 2026-05-09 12:00:00 UTC = 1778328000
+        out = format_observer_sample(
+            "Sample #1",
+            {"sampled_at": 1778328000.0, "new_anomalies": 0,
+             "clusters_sampled": 2, "regions_sampled": 1},
+        )
+        assert "2026-05-09" in out
+        # And not the raw float
+        assert "1778328000" not in out
+
+    def test_includes_anomaly_count(self):
+        out = format_observer_sample(
+            "Sample #2",
+            {"sampled_at": 1778328000.0, "new_anomalies": 3,
+             "clusters_sampled": 4, "regions_sampled": 1, "total_anomalies": 5},
+        )
+        assert "3" in out  # new anomalies this sample
+        assert "5" in out  # total anomalies running
+
+    def test_includes_clusters_sampled(self):
+        out = format_observer_sample(
+            "Sample #1",
+            {"sampled_at": 1778328000.0, "new_anomalies": 0,
+             "clusters_sampled": 7, "regions_sampled": 2},
+        )
+        assert "7" in out  # cluster count visible
+        assert "2" in out  # region count visible
+
+    def test_includes_label(self):
+        out = format_observer_sample(
+            "Sample #1",
+            {"sampled_at": 1778328000.0, "new_anomalies": 0,
+             "clusters_sampled": 2, "regions_sampled": 1},
+        )
+        assert "Sample #1" in out
+
+    def test_handles_missing_fields_gracefully(self):
+        # Older API versions or test doubles may omit fields.
+        out = format_observer_sample("Sample #1", {})
+        # Must not raise; should produce something usable.
+        assert "Sample #1" in out
+        assert isinstance(out, str)
+        assert len(out) > 0
+
+    def test_handles_none_sample(self):
+        # A failed sample call may pass through as None.
+        out = format_observer_sample("Sample #1", None)
+        assert "Sample #1" in out
+        assert isinstance(out, str)
+
+    def test_includes_duration_when_present(self):
+        out = format_observer_sample(
+            "Sample #1",
+            {"sampled_at": 1778328000.0, "sample_duration_ms": 12.34,
+             "new_anomalies": 0, "clusters_sampled": 1, "regions_sampled": 1},
+        )
+        assert "12.3" in out  # duration shows in ms with reasonable precision

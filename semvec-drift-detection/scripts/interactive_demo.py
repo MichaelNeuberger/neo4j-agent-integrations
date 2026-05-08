@@ -17,8 +17,6 @@ Usage:
 
 from __future__ import annotations
 
-import json
-import math
 import os
 import sys
 import textwrap
@@ -35,7 +33,6 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 from src.core.embedder import SentenceTransformerEmbedder
 from src.core.semvec_client import SemvecClient
-from src.core.drift_detector import DriftDetector
 from src.mcp.semvec_mcp_server import SemvecMCPServer
 
 _SHARED_SEMVEC: SemvecClient | None = None
@@ -48,16 +45,12 @@ def _build_semvec_client() -> SemvecClient:
         _SHARED_SEMVEC = SemvecClient(embedder=SentenceTransformerEmbedder())
     return _SHARED_SEMVEC
 from src.persistence.adapter import Neo4jSemvecAdapter
-from src.persistence.models import Cluster, AggregationStrategy, MemoryTier
-from src.persistence.neo4j_cluster_store import Neo4jClusterStore
-from src.persistence.neo4j_state_store import Neo4jStateStore
-from src.persistence.neo4j_phase_store import Neo4jPhaseStore
-from src.persistence.neo4j_drift_event_store import Neo4jDriftEventStore
-from src.persistence.neo4j_memory_store import Neo4jMemoryStore
-from src.analytics.similarity import SimilarityAnalyzer
-from src.analytics.influence import InfluenceAnalyzer
-from src.analytics.trajectories import TrajectoryAnalyzer
-from scripts.demo_helpers import sim_bar
+from scripts.demo_helpers import format_observer_sample, sim_bar
+
+
+def _print_observer_sample(label: str, sample) -> None:
+    """Thin wrapper so the call sites stay one-liners."""
+    print(f"  {format_observer_sample(label, sample)}")
 
 # ── Config ──────────────────────────────────────────────────────────────
 
@@ -863,19 +856,22 @@ def scenario_topic_switch(mcp: SemvecMCPServer, driver):
         sc = semvec_data["short_circuit"]
         mcp.detect_drift(neo4j_sid, q)
 
+        # Phase 4 forces the bar colour by HIT/MISS state rather than the
+        # similarity threshold (the imported ``sim_bar`` colours by sim
+        # band). Use a local variable name that doesn't shadow the helper.
         if sc:
             sc_hits += 1
             response = ""
-            sim_bar = f"{GREEN}{'█' * int(sim * BAR_W)}{'░' * (BAR_W - int(sim * BAR_W))}{RESET}"
-            print(f"  {step:>2}  {sim_bar} sim={sim:.2f}  {GREEN}HIT{RESET}  LLM skipped  {DIM}{ref_label}{RESET}")
+            forced_bar = f"{GREEN}{'█' * int(sim * BAR_W)}{'░' * (BAR_W - int(sim * BAR_W))}{RESET}"
+            print(f"  {step:>2}  {forced_bar} sim={sim:.2f}  {GREEN}HIT{RESET}  LLM skipped  {DIM}{ref_label}{RESET}")
             prev_response = None
         else:
-            sim_bar = f"{RED}{'█' * int(sim * BAR_W)}{'░' * (BAR_W - int(sim * BAR_W))}{RESET}"
+            forced_bar = f"{RED}{'█' * int(sim * BAR_W)}{'░' * (BAR_W - int(sim * BAR_W))}{RESET}"
             response = generate_response(q, agent_role="a clinical pharmacist reviewing diabetes treatment",
                                          semvec_context=semvec_data.get("context", ""))
             mcp.store_response(neo4j_sid, response)
             prev_response = response
-            print(f"  {step:>2}  {sim_bar} sim={sim:.2f}  {RED}MISS{RESET} LLM called   {DIM}{ref_label}{RESET}")
+            print(f"  {step:>2}  {forced_bar} sim={sim:.2f}  {RED}MISS{RESET} LLM called   {DIM}{ref_label}{RESET}")
         t_end = datetime.now(timezone.utc)
 
         edge_phase = "phase-4-cache" if sc else "phase-4-miss"
@@ -966,6 +962,16 @@ def scenario_ward_round(mcp: SemvecMCPServer, driver):
     neo4j_chen = mcp.create_agent_session(agent_id="chen-baseline")
     neo4j_chen_sid = neo4j_chen["session_id"]
 
+    # Threshold strategy for the ward round:
+    #   0.99 = "impossible" — the cluster's cosine similarity to a paraphrased
+    #          query is realistically capped well below 1.0, so 0.99 forces
+    #          a deterministic MISS. Used during the seeding phase (Chen) and
+    #          on each agent's *member* session where we want every turn to
+    #          extend conversation context, never short-circuit.
+    #   0.52 = below the expected cluster-to-paraphrase similarity for the
+    #          shared Park topic, so paraphrases from Volkov and Tanaka can
+    #          HIT against Chen's seeded entries. Tuned for MPNet-768 and
+    #          the specific seed/paraphrase pairs in this demo.
     chen_sid = None
     for i, msg in enumerate(chen_queries):
         t0 = datetime.now(timezone.utc)
@@ -997,7 +1003,8 @@ def scenario_ward_round(mcp: SemvecMCPServer, driver):
             )
 
     semvec.add_cluster_member(cid, chen_sid)
-    info("\n  Chen session", f"{chen_sid[:16]}... added to cluster")
+    print()
+    info("Chen session", f"{chen_sid[:16]}... added to cluster")
 
     # ── Step 3: Dr. Volkov queries (threshold=0.52) ──
     subheader("Step 3: Dr. Volkov queries (threshold=0.52 — expect HITs from Chen)")
@@ -1064,7 +1071,12 @@ def scenario_ward_round(mcp: SemvecMCPServer, driver):
     cdata_t1 = semvec.cluster_run(cid, tanaka_q1, short_circuit_threshold=0.52)
     sim_t1 = cdata_t1.get("top_similarity", 0.0)
     sc_t1 = cdata_t1.get("short_circuit", False)
-    tanaka_data = semvec.run(tanaka_q1, short_circuit_threshold=0.99)
+    # Same explicit-session pattern as Chen/Volkov: start with None so Semvec
+    # mints a fresh session, then thread the returned id through any follow-up
+    # turns. Tanaka has only one semvec.run call today, but the pattern keeps
+    # the three doctors symmetric and future-proof.
+    tanaka_sid = None
+    tanaka_data = semvec.run(tanaka_q1, session_id=tanaka_sid, short_circuit_threshold=0.99)
     tanaka_sid = tanaka_data["session_id"]
     mcp.detect_drift(neo4j_tanaka_sid, tanaka_q1)
 
@@ -1083,7 +1095,8 @@ def scenario_ward_round(mcp: SemvecMCPServer, driver):
     mcp.detect_drift(neo4j_tanaka_sid, ecg_msg)
     mcp.store_response(neo4j_tanaka_sid, ecg_resp)
     t1 = datetime.now(timezone.utc)
-    info("\n  Tanaka ECG finding stored", "LVH + Amlodipine recommendation")
+    print()
+    info("Tanaka ECG finding stored", "LVH + Amlodipine recommendation")
     record_investigated(
         driver, neo4j_tanaka_sid, "Patient", "David Park",
         step=0, phase="tanaka-ecg",
@@ -1311,6 +1324,11 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
          [("Medication", "Metformin 500mg"), ("Medication", "Atorvastatin 40mg")]),
     ]
 
+    # 0.75 is the operational sweet spot for in-domain Q&A on MPNet-768:
+    # high enough that paraphrases of *the same question* HIT, low enough
+    # that genuinely new on-topic queries still drive the LLM. The off-topic
+    # branch below reuses the same threshold so we can compare apples-to-
+    # apples — only the QUARANTINE_THRESHOLD (0.5) below decides isolation.
     prev_resp = None
     facts_total = 0
     for i, (msg, entity_refs) in enumerate(oncology_queries):
@@ -1537,6 +1555,12 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
     # ── Step 3: Create Region + add clusters ──
     # IMPORTANT: Region + Observer must exist BEFORE drift events fire,
     # otherwise the region won't receive them.
+    #   consensus_threshold=0.5  — half the clusters in the region must
+    #     fire a drift event in the vote window for a Region-level
+    #     consensus alert to trigger. Two clusters → both must drift.
+    #   vote_window_seconds=60.0 — drift events older than this are
+    #     evicted from the consensus window. 60s comfortably covers a
+    #     full demo run; in production this is typically minutes.
     subheader("Step 3: Create Region 'hospital-network' (consensus_threshold=0.5)")
     try:
         region = semvec.create_region(name="hospital-network", consensus_threshold=0.5,
@@ -1551,6 +1575,10 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
         print(f"  {YELLOW}Region: {e}{RESET}")
 
     # ── Step 4: Create Observer ──
+    # sample_interval_seconds=30.0 is the *automatic* sampling cadence for
+    # a long-running observer. The demo calls observer_sample() manually
+    # at strategic moments (Steps 5b/5d), so this value only matters if
+    # you let the demo idle — which we don't. Set well above demo runtime.
     subheader("Step 4: Create Global Observer")
     try:
         observer = semvec.create_observer(
@@ -1583,6 +1611,10 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
         ("What is the latest infection control audit status at Memorial General?",
          [("Facility", "Memorial General Hospital")]),
     ]
+    # 0.60 is calibrated for the consensus scenario: cluster-to-paraphrase
+    # similarity inside one well-seeded department typically lands in
+    # 0.55-0.70 with MPNet-768, so 0.60 yields a HIT for the four on-topic
+    # turns and a clear MISS on the deliberate pivot at step 5.
     cardio_prev = None
     for i, (msg, entity_refs) in enumerate(cardio_run_msgs):
         t0 = datetime.now(timezone.utc)
@@ -1629,7 +1661,7 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
     subheader("Step 5b: Observer sample after cardiology drift")
     try:
         sample1 = semvec.observer_sample()
-        info("Sample #1", f"sampled at {sample1.get('sampled_at', 'N/A')}")
+        _print_observer_sample("Sample #1", sample1)
     except Exception as e:
         print(f"  {YELLOW}observer sample: {e}{RESET}")
 
@@ -1710,7 +1742,7 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
     subheader("Step 5d: Observer sample after both clusters drifted")
     try:
         sample2 = semvec.observer_sample()
-        info("Sample #2", f"sampled at {sample2.get('sampled_at', 'N/A')}")
+        _print_observer_sample("Sample #2", sample2)
     except Exception as e:
         print(f"  {YELLOW}observer sample: {e}{RESET}")
 
@@ -1779,20 +1811,23 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
                 MERGE (r:Region {region_id: $rid})
                 SET r.name = 'hospital-network', r.consensus_threshold = 0.5
             """, rid=rid).consume()
-        # Cluster nodes + CONTAINS_CLUSTER
-        for cid, cname in [(cid_a, "cardiology-memorial"), (cid_b, "emergency-riverside")]:
+        # Cluster nodes + CONTAINS_CLUSTER. Use ``c_id`` (not ``cid``) for the
+        # loop variable so we don't shadow ``cid_a``/``cid_b`` from the outer
+        # scope — the same name was rebinding the outer references after the
+        # loop completed.
+        for c_id, cname in [(cid_a, "cardiology-memorial"), (cid_b, "emergency-riverside")]:
             db.run("""
                 MERGE (c:Cluster {cluster_id: $cid})
                 SET c.name = $name, c.scenario = 'consensus'
-            """, cid=cid, name=cname).consume()
+            """, cid=c_id, name=cname).consume()
             if rid:
                 db.run("""
                     MATCH (r:Region {region_id: $rid})
                     MATCH (c:Cluster {cluster_id: $cid})
                     MERGE (r)-[:CONTAINS_CLUSTER]->(c)
-                """, rid=rid, cid=cid).consume()
+                """, rid=rid, cid=c_id).consume()
         # MEMBER_OF
-        for sess_id, cid, fac_name in [
+        for sess_id, c_id, fac_name in [
             (neo4j_cardio_sid, cid_a, "Memorial General Hospital"),
             (neo4j_emerg_sid, cid_b, "Riverside Medical Center"),
         ]:
@@ -1800,11 +1835,11 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
                 MATCH (s:AgentSession {session_id: $sid})
                 MATCH (c:Cluster {cluster_id: $cid})
                 MERGE (s)-[:MEMBER_OF {facility: $fac}]->(c)
-            """, sid=sess_id, cid=cid, fac=fac_name).consume()
+            """, sid=sess_id, cid=c_id, fac=fac_name).consume()
 
     # Audit-trail: link each agent session to its facility (outside the with-block
     # so record_investigated can open its own session safely).
-    for sess_id, cid, fac_name in [
+    for sess_id, c_id, fac_name in [
         (neo4j_cardio_sid, cid_a, "Memorial General Hospital"),
         (neo4j_emerg_sid, cid_b, "Riverside Medical Center"),
     ]:
@@ -1812,7 +1847,7 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
             driver, sess_id, "Facility", fac_name,
             step=0, phase="cluster-facility",
             drift_score=0.0,
-            extra={"cluster_id": cid},
+            extra={"cluster_id": c_id},
         )
 
     with driver.session(database=NEO4J_DATABASE) as db:
@@ -1893,10 +1928,12 @@ def scenario_hospital_consensus(mcp: SemvecMCPServer, driver):
     info("Cortex consensus", "qualified-majority vote on the pivot alert")
     info("Neo4j", "Region → CONTAINS_CLUSTER → Clusters → MEMBER_OF ← Sessions")
 
-    # Cleanup Semvec
-    for cid in [cid_a, cid_b]:
+    # Cleanup Semvec — use ``c_id`` so we don't shadow ``cid_a``/``cid_b``.
+    for c_id in [cid_a, cid_b]:
+        if c_id is None:
+            continue
         try:
-            semvec.delete_cluster(cid)
+            semvec.delete_cluster(c_id)
         except Exception:
             pass
     if rid:
@@ -1986,9 +2023,18 @@ def scenario_shift_handoff(mcp: SemvecMCPServer, driver):
                 extra={"agent_role": volkov_role, "shift": "night"},
             )
 
-    info("\n  Volkov Semvec session", f"{volkov_semvec_sid[:16]}... (6 overnight turns)")
+    print()
+    info(
+        "Volkov Semvec session",
+        f"{volkov_semvec_sid[:16]}... ({len(night_queries)} overnight turns)",
+    )
 
     # ── Step 2: Baseline — fresh Tanaka session (no context) ──
+    # 0.65 = realistic operational threshold for the handoff scenario.
+    # Without an import, Tanaka's brand-new session has no prior context,
+    # so the baseline call is expected to MISS — that's the contrast we
+    # show vs. the post-import call later, which uses the same threshold
+    # but HITs because the imported state primed Tanaka's session.
     subheader("Step 2: Baseline — Tanaka without import (fresh session)")
     tanaka_fresh = semvec.run(
         "What happened overnight with James Morrison — any changes in condition?",
@@ -2055,7 +2101,7 @@ def scenario_shift_handoff(mcp: SemvecMCPServer, driver):
                 info(
                     "Consistency probe",
                     f"{colour}{'PASSED' if consistent else 'FAILED'}{RESET}  "
-                    f"(3 probes, tolerance 1e-3)",
+                    f"({len(probes)} probes, tolerance 1e-3)",
                 )
             except Exception as e:
                 print(f"  {YELLOW}verify_consistency: {e}{RESET}")
@@ -2220,6 +2266,47 @@ WITH inv.phase AS phase,
 RETURN phase, steps, llm_calls, llm_skipped, avg_ms, avg_drift
 ORDER BY phase"""),
 
+        ("TABLE  Medication safety (Sc.4) — what did the oncology guard investigate?",
+         """MATCH (s:AgentSession {agent_id: 'oncology-safety-guard'})-[inv:INVESTIGATED]->(e)
+RETURN inv.phase AS phase, labels(e)[0] AS entity_type, e.name AS entity,
+       inv.step AS step, inv.memory_text AS memory
+ORDER BY phase, step"""),
+
+        ("TABLE  Medication safety (Sc.4) — drift signals around chemotherapy",
+         """MATCH (s:AgentSession {agent_id: 'oncology-safety-guard'})-[inv:INVESTIGATED]->(e)
+WITH inv, e
+ORDER BY inv.step
+RETURN inv.step AS step,
+       inv.phase AS phase,
+       round(inv.drift_score * 100) / 100 AS drift,
+       round(coalesce(inv.top_k_similarity, 0) * 100) / 100 AS topk_sim,
+       inv.short_circuit AS sc,
+       collect(DISTINCT labels(e)[0] + ':' + e.name) AS entities,
+       inv.query_preview AS query
+ORDER BY step"""),
+
+        ("TABLE  Shift handoff (Sc.6) — Volkov night vs Tanaka day, side-by-side",
+         """MATCH (s:AgentSession)-[inv:INVESTIGATED]->(e)
+WHERE s.agent_id IN ['volkov-night-shift', 'tanaka-day-shift']
+RETURN s.agent_id AS doctor,
+       inv.phase AS phase,
+       coalesce(inv.shift, '?') AS shift,
+       inv.step AS step,
+       labels(e)[0] AS entity_type,
+       e.name AS entity,
+       round(inv.drift_score * 100) / 100 AS drift
+ORDER BY doctor, step"""),
+
+        ("TABLE  Shift handoff (Sc.6) — drift trajectory across night → day",
+         """MATCH (s:AgentSession)-[inv:INVESTIGATED]->()
+WHERE s.agent_id IN ['volkov-night-shift', 'tanaka-day-shift']
+WITH s.agent_id AS doctor, inv.step AS step,
+     round(inv.drift_score * 100) / 100 AS drift,
+     inv.semvec_drift_phase AS phase,
+     round(coalesce(inv.top_k_similarity, 0) * 100) / 100 AS topk_sim
+RETURN doctor, step, drift, phase, topk_sim
+ORDER BY doctor, step"""),
+
         ("TABLE  Cluster members — which agents belong to which cluster?",
          """MATCH (s:AgentSession)-[m:MEMBER_OF]->(c:Cluster)
 RETURN c.name AS cluster, s.agent_id AS agent, m.role AS role, m.facility AS facility
@@ -2297,6 +2384,21 @@ RETURN s, inv, e, r1, connected, st, tr, d, ph"""),
          """MATCH (s:AgentSession {agent_id: 'drift-shortcircuit-demo'})-[inv:INVESTIGATED]->(e)
 WHERE inv.phase IN ['phase-4-cache', 'phase-4-miss', 'on-topic']
 RETURN s, inv, e"""),
+
+        ("GRAPH  Medication safety (Sc.4) — oncology guard's view of Gutierrez chemo",
+         """MATCH (s:AgentSession {agent_id: 'oncology-safety-guard'})-[inv:INVESTIGATED]->(e)
+OPTIONAL MATCH (e)-[ci:CONTRAINDICATED_WITH]->(other:Medication)
+OPTIONAL MATCH (treat:Treatment)-[u:USES]->(e)
+OPTIONAL MATCH (pat:Patient)-[hasT:HAS_TREATMENT]->(treat)
+RETURN s, inv, e, ci, other, treat, u, pat, hasT"""),
+
+        ("GRAPH  Shift handoff (Sc.6) — Volkov night ⇄ Tanaka day around Morrison",
+         """MATCH (s:AgentSession)-[inv:INVESTIGATED]->(e)
+WHERE s.agent_id IN ['volkov-night-shift', 'tanaka-day-shift']
+OPTIONAL MATCH (e)-[r1]->(connected)
+WHERE type(r1) IN ['DIAGNOSED_WITH','TREATED_BY','PRESCRIBED','HAD_ENCOUNTER','CONTRAINDICATED_WITH']
+OPTIONAL MATCH (s)-[:CURRENT_PHASE]->(ph:Phase)
+RETURN s, inv, e, r1, connected, ph"""),
 
         ("GRAPH  Hospital network — Region → Clusters → Agents → Facilities",
          """MATCH (c:Cluster)

@@ -180,6 +180,32 @@ python scripts/interactive_demo.py              # LLM enabled (default)
 python scripts/interactive_demo.py --no-llm     # skip LLM calls (shows N/A)
 ```
 
+### Tuning Constants
+
+The interactive demo uses two `.env`-driven knobs and a handful of inline,
+scenario-specific thresholds. The latter are commented at their first use,
+but for orientation:
+
+| Knob | Where | Default | What it controls |
+|---|---|---|---|
+| `DRIFT_THRESHOLD` | `.env` | `0.55` | Drift score above which `_is_drift()` flags a turn as a real topic switch. |
+| `DRIFT_SIM_CEILING` | `.env` | `0.55` | Cosine-similarity ceiling for the same gate — drift_score crosses *and* similarity drops. Together these filter in-domain sub-shifts. |
+| `short_circuit_threshold=0.99` | Sc 3 / Sc 6 | — | "Impossible" threshold — forces deterministic MISS during seeding so context accumulates. |
+| `short_circuit_threshold=0.52` | Sc 3 (Volkov, Tanaka) | — | Calibrated below typical paraphrase similarity on the Park topic (MPNet-768) so cluster HITs fire. |
+| `short_circuit_threshold=0.60` | Sc 5 (cardiology, ER) | — | Mid-band threshold for the consensus scenario — HIT on on-topic, MISS on the deliberate admin pivot. |
+| `short_circuit_threshold=0.65` | Sc 6 (Tanaka) | — | Realistic operational threshold; baseline (no import) MISSes, post-import HITs. |
+| `short_circuit_threshold=0.75` | Sc 4 (oncology) | — | Operational sweet spot for in-domain Q&A: paraphrases HIT, new on-topic queries MISS. |
+| `QUARANTINE_THRESHOLD=0.5` | Sc 4 | — | Below this similarity, the isolation layer quarantines the turn. |
+| `consensus_threshold=0.5` | Sc 5 | — | Fraction of clusters in the region that must drift within `vote_window_seconds` for region consensus. |
+| `vote_window_seconds=60.0` | Sc 5 | — | Sliding window for region consensus voting. |
+| `sample_interval_seconds=30.0` | Sc 5 | — | Automatic observer cadence. The demo calls `observer_sample()` manually, so this only matters if you let it idle. |
+| `coupling_factor=0.20` (Sc 5) / `0.25` (Sc 3) | per cluster | — | Strength with which the cluster's aggregate vector is blended back into member sessions on `cluster_feedback`. |
+
+These defaults are tuned for `all-mpnet-base-v2` (768-dim, the demo's
+default embedder). If you swap to `all-MiniLM-L6-v2` (384-dim) or another
+model, expect the numeric thresholds to drift — re-tune by watching the
+`sim_bar` colour bands in the demo output.
+
 ### Run Tests
 
 ```bash
