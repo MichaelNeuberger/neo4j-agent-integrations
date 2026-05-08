@@ -1298,16 +1298,20 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
     print()
 
     agent_role = "an oncology pharmacist monitoring Carlos Gutierrez's chemotherapy safety"
+    # Some queries deliberately carry verbatim facts the upstream
+    # extractor recognises (ISO/DE dates, EUR currency, validated
+    # IBAN, DE-VAT) so the "Verbatim facts cached" counter goes up
+    # in a healthcare-realistic way: schedule, billing, identifiers.
     oncology_queries = [
-        ("Carlos Gutierrez is starting Chemotherapy Cycle 1 — what pre-treatment labs are required?",
+        ("Carlos Gutierrez is starting Chemotherapy Cycle 1 on 2026-05-15 — what pre-treatment labs are required?",
          [("Patient", "Carlos Gutierrez"), ("Treatment", "Chemotherapy Cycle 1")]),
-        ("What antiemetic protocol for his cisplatin-based regimen?",
+        ("Repeat infusion every 21 days; next dates 05.06.2026 and 26.06.2026. What antiemetic protocol for his cisplatin-based regimen?",
          [("Treatment", "Chemotherapy Cycle 1")]),
         ("CRITICAL: Monitor for neutropenic fever — what ANC thresholds for dose delay?",
          [("Patient", "Carlos Gutierrez"), ("Treatment", "Chemotherapy Cycle 1")]),
         ("Does Chemotherapy Cycle 1 use Atorvastatin 40mg — any interactions?",
          [("Medication", "Atorvastatin 40mg"), ("Treatment", "Chemotherapy Cycle 1")]),
-        ("What is the contraindication profile between chemo drugs and his existing medications?",
+        ("Estimated treatment cost 4.500,00 EUR per cycle, billed to IBAN DE89 3704 0044 0532 0130 00. What is the contraindication profile between chemo drugs and his existing medications?",
          [("Medication", "Metformin 500mg"), ("Medication", "Atorvastatin 40mg")]),
     ]
 
@@ -1392,8 +1396,21 @@ def scenario_medication_safety(mcp: SemvecMCPServer, driver):
     # ── Step 8: Get anchor score ──
     subheader("Step 8: Anchor score — how far has session drifted from oncology?")
     try:
-        anchor_score = semvec.get_anchor_score(sid)
-        info("Anchor score", str(anchor_score))
+        anchor = semvec.get_anchor_score(sid)
+        score = anchor.get("anchor_score", 0.0)
+        threshold = anchor.get("drift_threshold", 0.5)
+        if score >= threshold:
+            colour, verdict = RED, "DRIFTED"
+        elif score >= threshold / 2:
+            colour, verdict = YELLOW, "shifting"
+        else:
+            colour, verdict = GREEN, "on-anchor"
+        info(
+            "Anchor score",
+            f"{colour}{score:.3f}{RESET} {verdict}  "
+            f"(threshold {threshold:.2f}, anchors {anchor.get('anchor_count', 0)}, "
+            f"realignment_remaining {anchor.get('realignment_remaining', 0)})",
+        )
     except Exception as e:
         print(f"  {YELLOW}anchor_score: {e}{RESET}")
 
