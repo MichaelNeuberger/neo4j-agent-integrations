@@ -1,0 +1,529 @@
+"""Local Semvec client.
+
+A thin, in-process façade over the bundled :mod:`semvec` package that
+exposes the full Layer 1–5 surface (sessions, clusters, regions, the
+global observer, and the network transfer layer) as a single ergonomic
+client returning plain Python dictionaries.
+
+No network, no API key. The runtime lives in this Python process.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
+# ``semvec.api.__init__`` pulls in FastAPI/slowapi at import time, which
+# we don't need for in-process orchestration. We side-step it by
+# registering a minimal stub so the manager submodules import directly.
+import sys
+import types
+import os
+import importlib.util
+
+if "semvec.api" not in sys.modules:
+    import semvec  # noqa: F401 — ensure package is importable first
+
+    _semvec_origin = importlib.util.find_spec("semvec").origin
+    if _semvec_origin is None:
+        raise ImportError("Cannot locate the installed `semvec` package")
+    _api_path = os.path.join(os.path.dirname(_semvec_origin), "api")
+    _stub = types.ModuleType("semvec.api")
+    _stub.__path__ = [_api_path]
+    sys.modules["semvec.api"] = _stub
+
+from semvec.api.cluster_manager import ClusterManager  # noqa: E402
+from semvec.api.event_bus import DriftEventBus  # noqa: E402
+from semvec.api.global_observer import GlobalObserver  # noqa: E402
+from semvec.api.network_manager import NetworkManager  # noqa: E402
+from semvec.api.regional_manager import RegionalManager  # noqa: E402
+from semvec.api.session_manager import SessionManager  # noqa: E402
+
+_VALID_DRIFT_PHASES = {"stable", "shifting", "drifted"}
+
+
+class _DimensionedSessionManager(SessionManager):
+    """SessionManager whose default dimension and model match the embedder.
+
+    Cluster-backed sessions are created indirectly by the cluster manager
+    without an explicit dimension argument; this subclass supplies the
+    defaults derived from the embedder so every session lines up.
+    """
+
+    def __init__(self, default_dimension: int = 768, default_model: str = "all-mpnet-base-v2") -> None:
+        super().__init__()
+        self._default_dim = int(default_dimension)
+        self._default_model = default_model
+
+    def create_session(self, *args, **kwargs):  # type: ignore[override]
+        kwargs.setdefault("dimension", self._default_dim)
+        kwargs.setdefault("model_name", self._default_model)
+        return super().create_session(*args, **kwargs)
+
+
+class SemvecClient:
+    """In-process client wrapping the bundled Semvec managers.
+
+    Provides one ergonomic surface that orchestrates session, cluster,
+    region, observer, and network managers while returning plain
+    dictionaries that are easy to mirror into Neo4j.
+
+    Parameters
+    ----------
+    embedder:
+        Optional duck-typed embedder with ``get_embedding(str) -> ndarray``
+        and ``get_dimension() -> int``. When omitted, Semvec lazily loads
+        ``sentence-transformers`` with the default model.
+    dimension:
+        Default embedding dimension used when creating sessions without a
+        provided embedder. Ignored if ``embedder`` is supplied.
+    model_name:
+        Sentence-transformer model name advertised in session metadata.
+    """
+
+    def __init__(
+        self,
+        embedder: Any = None,
+        dimension: int = 768,
+        model_name: str = "all-mpnet-base-v2",
+    ) -> None:
+        if embedder is not None:
+            self._dimension = int(embedder.get_dimension())
+        else:
+            self._dimension = int(dimension)
+        self._model_name = model_name
+
+        self._sessions = _DimensionedSessionManager(
+            default_dimension=self._dimension,
+            default_model=self._model_name,
+        )
+        if embedder is not None:
+            self._sessions.inject_embedder(embedder)
+
+        self._clusters = ClusterManager(self._sessions)
+        self._event_bus = DriftEventBus()
+        self._regions = RegionalManager(
+            self._sessions, self._clusters, self._event_bus
+        )
+        self._observer: Optional[GlobalObserver] = None
+
+        self._network = NetworkManager(self._sessions)
+
+    # ------------------------------------------------------------------
+    # Health
+
+    def health(self) -> dict:
+        return {
+            "status": "ok",
+            "active_sessions": self._sessions.session_count(),
+            "version": "semvec-local",
+        }
+
+    # ------------------------------------------------------------------
+    # Layer 1 — /run, /store
+
+    def run(
+        self,
+        message: str,
+        session_id: Optional[str] = None,
+        response: Optional[str] = None,
+        short_circuit_threshold: float = 0.85,
+        reset_context: bool = False,
+    ) -> dict:
+        sid = session_id
+        if sid is None:
+            sid = self._sessions.create_session(
+                dimension=self._dimension, model_name=self._model_name
+            )
+        elif reset_context:
+            if self._sessions.get_session(sid) is None:
+                sid = self._sessions.create_session(
+                    session_id=sid,
+                    dimension=self._dimension,
+                    model_name=self._model_name,
+                )
+            else:
+                self._sessions.reset_session(sid)
+        elif self._sessions.get_session(sid) is None:
+            raise ValueError(f"Session not found: {sid}")
+
+        if response:
+            self._sessions.store_qa(sid, response)
+
+        top_sim, short_circuit = self._sessions.compute_short_circuit(
+            sid, message, threshold=short_circuit_threshold
+        )
+        drift_score, drift_detected, drift_phase = self._sessions.compute_drift(
+            sid, message
+        )
+
+        self._sessions.buffer_message(sid, message)
+        context = self._sessions.context_block(sid, message, top_k=5)
+
+        if drift_detected:
+            self._publish_drift_event(sid, float(drift_score), drift_phase)
+
+        if drift_phase not in _VALID_DRIFT_PHASES:
+            drift_phase = "stable"
+
+        return {
+            "session_id": sid,
+            "context": context,
+            "top_similarity": float(top_sim),
+            "short_circuit": bool(short_circuit),
+            "drift_score": float(drift_score),
+            "drift_detected": bool(drift_detected),
+            "drift_phase": drift_phase,
+        }
+
+    def store(self, session_id: str, response: str) -> dict:
+        self._sessions.store_qa(session_id, response)
+        return {"session_id": session_id}
+
+    # ------------------------------------------------------------------
+    # Layer 1b — Session control
+
+    def create_session(
+        self,
+        dimension: Optional[int] = None,
+        model_name: Optional[str] = None,
+        use_meta_pss: bool = False,
+        enable_topic_switch: bool = True,
+    ) -> dict:
+        sid = self._sessions.create_session(
+            dimension=dimension or self._dimension,
+            model_name=model_name or self._model_name,
+            use_meta_pss=use_meta_pss,
+            enable_topic_switch=enable_topic_switch,
+        )
+        return {"session_id": sid, "created": True}
+
+    def export_session(self, session_id: str) -> dict:
+        payload = self._sessions.export_state(session_id)
+        if payload is None:
+            raise ValueError(f"Session not found: {session_id}")
+        return payload
+
+    def import_session(self, session_id: str, state_dict: dict) -> dict:
+        if self._sessions.get_session(session_id) is None:
+            raise ValueError(f"Session not found: {session_id}")
+        ok = self._sessions.import_state(session_id, state_dict)
+        if not ok:
+            raise ValueError("Malformed or tampered state_dict")
+        return {"session_id": session_id, "imported": True}
+
+    def add_anchor(self, session_id: str, embedding: list[float]) -> dict:
+        count = self._sessions.add_anchor(session_id, embedding)
+        if count is None:
+            raise ValueError(f"Session not found: {session_id}")
+        return {"session_id": session_id, "anchor_count": count}
+
+    def get_anchor_score(self, session_id: str) -> dict:
+        score = self._sessions.get_anchor_score(session_id)
+        if score is None:
+            raise ValueError(f"Session not found: {session_id}")
+        return {"session_id": session_id, **score}
+
+    def inject_memory(
+        self,
+        session_id: str,
+        embedding: list[float],
+        text: str,
+        tier: str = "short_term",
+        importance: float = 0.5,
+        access_count: int = 0,
+    ) -> dict:
+        total = self._sessions.inject_memory(
+            session_id,
+            embedding=embedding,
+            text=text,
+            tier=tier,
+            importance=importance,
+            access_count=access_count,
+        )
+        if total is None:
+            raise ValueError(f"Session not found: {session_id}")
+        return {"session_id": session_id, "tier": tier, "total_memories": total}
+
+    def set_isolation(
+        self,
+        session_id: str,
+        level: str = "OPEN",
+        similarity_threshold: float = 0.7,
+        exclusion_embeddings: Optional[list[list[float]]] = None,
+        allowlist_embeddings: Optional[list[list[float]]] = None,
+    ) -> dict:
+        ok = self._sessions.set_isolation(
+            session_id,
+            level=level,
+            exclusion_embeddings=exclusion_embeddings,
+            allowlist_embeddings=allowlist_embeddings,
+            similarity_threshold=similarity_threshold,
+        )
+        if not ok:
+            raise ValueError(f"Session not found: {session_id}")
+        return {"session_id": session_id, "level": level}
+
+    def add_trigger(
+        self,
+        session_id: str,
+        keyword: Optional[str] = None,
+        embedding: Optional[list[float]] = None,
+        threshold: float = 0.8,
+    ) -> dict:
+        count = self._sessions.add_trigger(
+            session_id, keyword=keyword, embedding=embedding, threshold=threshold
+        )
+        if count is None:
+            raise ValueError(f"Session not found: {session_id}")
+        return {"session_id": session_id, "trigger_count": count}
+
+    # ------------------------------------------------------------------
+    # Layer 2 — Cluster
+
+    def create_cluster(
+        self,
+        name: str,
+        aggregation_mode: str = "weighted_average",
+        coupling_factor: float = 0.0,
+    ) -> dict:
+        rec = self._clusters.create_cluster(
+            name=name,
+            aggregation_mode=aggregation_mode,
+            coupling_factor=coupling_factor,
+        )
+        return {
+            "cluster_id": rec.cluster_id,
+            "name": rec.name,
+            "aggregation_mode": rec.aggregation_mode,
+            "coupling_factor": rec.coupling_factor,
+        }
+
+    def list_clusters(self) -> list[dict]:
+        return [
+            {
+                "cluster_id": r.cluster_id,
+                "name": r.name,
+                "member_count": len(r.member_session_ids),
+            }
+            for r in self._clusters.list_clusters()
+        ]
+
+    def get_cluster(self, cluster_id: str) -> dict:
+        state = self._clusters.get_cluster_state(cluster_id)
+        if state is None:
+            raise ValueError(f"Cluster not found: {cluster_id}")
+        return state
+
+    def delete_cluster(self, cluster_id: str) -> dict:
+        ok = self._clusters.delete_cluster(cluster_id)
+        if not ok:
+            raise ValueError(f"Cluster not found: {cluster_id}")
+        return {"deleted": True}
+
+    def cluster_run(
+        self,
+        cluster_id: str,
+        message: str,
+        response: Optional[str] = None,
+        short_circuit_threshold: Optional[float] = None,
+    ) -> dict:
+        if self._clusters.get_cluster(cluster_id) is None:
+            raise ValueError(f"Cluster not found: {cluster_id}")
+        threshold = 0.85 if short_circuit_threshold is None else short_circuit_threshold
+        return self.run(
+            message=message,
+            session_id=cluster_id,
+            response=response,
+            short_circuit_threshold=threshold,
+        )
+
+    def cluster_store(self, cluster_id: str, message: str, response: str) -> dict:
+        result = self._clusters.store_in_cluster(cluster_id, message, response)
+        if result is None:
+            raise ValueError(f"Cluster not found: {cluster_id}")
+        return result
+
+    def cluster_feedback(self, cluster_id: str) -> dict:
+        updated = self._clusters.apply_coupling_feedback(cluster_id)
+        if updated < 0:
+            raise ValueError(f"Cluster not found: {cluster_id}")
+        return {"cluster_id": cluster_id, "sessions_updated": updated}
+
+    def add_cluster_member(self, cluster_id: str, session_id: str) -> dict:
+        added = self._clusters.add_member(cluster_id, session_id)
+        return {"cluster_id": cluster_id, "session_id": session_id, "added": bool(added)}
+
+    def remove_cluster_member(self, cluster_id: str, session_id: str) -> dict:
+        removed = self._clusters.remove_member(cluster_id, session_id)
+        return {
+            "cluster_id": cluster_id,
+            "session_id": session_id,
+            "removed": bool(removed),
+        }
+
+    # ------------------------------------------------------------------
+    # Layer 3 — Region
+
+    def create_region(
+        self,
+        name: str,
+        consensus_threshold: float = 0.5,
+        vote_window_seconds: float = 60.0,
+    ) -> dict:
+        rec = self._regions.create_region(
+            name=name,
+            consensus_threshold=consensus_threshold,
+            vote_window_seconds=vote_window_seconds,
+        )
+        return {
+            "region_id": rec.region_id,
+            "name": rec.name,
+            "meta_session_id": rec.meta_session_id,
+        }
+
+    def list_regions(self) -> list[dict]:
+        return [
+            {"region_id": r.region_id, "name": r.name, "cluster_count": len(r.cluster_ids)}
+            for r in self._regions.list_regions()
+        ]
+
+    def get_region(self, region_id: str) -> dict:
+        state = self._regions.get_region_state(region_id)
+        if state is None:
+            raise ValueError(f"Region not found: {region_id}")
+        return state
+
+    def delete_region(self, region_id: str) -> dict:
+        ok = self._regions.delete_region(region_id)
+        if not ok:
+            raise ValueError(f"Region not found: {region_id}")
+        return {"deleted": True}
+
+    def add_region_cluster(self, region_id: str, cluster_id: str) -> dict:
+        added = self._regions.add_cluster(region_id, cluster_id)
+        if not added:
+            raise ValueError(f"Region not found: {region_id}")
+        return {"added": True}
+
+    def remove_region_cluster(self, region_id: str, cluster_id: str) -> dict:
+        removed = self._regions.remove_cluster(region_id, cluster_id)
+        if not removed:
+            raise ValueError(f"Region or cluster not found")
+        return {"removed": True}
+
+    def get_region_events(self, region_id: str, limit: int = 20) -> list[dict]:
+        if self._regions.get_region(region_id) is None:
+            raise ValueError(f"Region not found: {region_id}")
+        return [
+            {
+                "cluster_id": ev.cluster_id,
+                "region_id": ev.region_id,
+                "drift_score": ev.drift_score,
+                "drift_phase": ev.drift_phase,
+                "timestamp": ev.timestamp,
+            }
+            for ev in self._regions.get_recent_events(region_id, limit=limit)
+        ]
+
+    # ------------------------------------------------------------------
+    # Layer 4 — Global Observer
+
+    def create_observer(
+        self,
+        sample_interval_seconds: float = 30.0,
+        region_ids: Optional[list[str]] = None,
+    ) -> dict:
+        if self._observer is None:
+            self._observer = GlobalObserver(
+                cluster_manager=self._clusters,
+                regional_manager=self._regions,
+                session_manager=self._sessions,
+                sample_interval_seconds=sample_interval_seconds,
+            )
+        for rid in region_ids or []:
+            self._observer.register_region(rid)
+        return {
+            "observer_id": self._observer.observer_id,
+            "registered_regions": len(self._observer.get_registered_regions()),
+            "meta_session_id": self._observer.meta_session_id,
+        }
+
+    def get_observer_summary(self) -> dict:
+        if self._observer is None:
+            raise ValueError("Observer not created — call create_observer() first")
+        return self._observer.get_summary()
+
+    def observer_sample(self) -> dict:
+        if self._observer is None:
+            raise ValueError("Observer not created — call create_observer() first")
+        return self._observer.sample()
+
+    def get_anomalies(self, limit: int = 20) -> list[dict]:
+        if self._observer is None:
+            return []
+        return [
+            {
+                "anomaly_id": a.anomaly_id,
+                "timestamp": a.timestamp,
+                "anomaly_type": a.anomaly_type,
+                "affected_cluster_ids": a.affected_cluster_ids,
+                "description": a.description,
+                "severity": a.severity,
+            }
+            for a in self._observer.get_anomalies(limit=limit)
+        ]
+
+    def clear_anomalies(self) -> dict:
+        if self._observer is None:
+            return {"cleared": 0}
+        return {"cleared": self._observer.clear_anomalies()}
+
+    # ------------------------------------------------------------------
+    # Layer 5 — Network
+
+    def transfer_delta(
+        self,
+        source_session_id: str,
+        target_session_id: str,
+        max_weight: float = 0.15,
+    ) -> dict:
+        result = self._network.transfer_delta(
+            source_session_id, target_session_id, max_weight=max_weight
+        )
+        if result is None:
+            raise ValueError("Source or target session not found")
+        return result
+
+    def switch_user(self, user_id: str) -> dict:
+        return self._network.switch_user(user_id)
+
+    def get_active_user(self) -> dict:
+        return {"active_user": self._network.get_active_user()}
+
+    def propose_consensus(
+        self, proposer_session_id: str, target_embedding: list[float]
+    ) -> dict:
+        result = self._network.propose_consensus(proposer_session_id, target_embedding)
+        if result is None:
+            raise ValueError(f"Proposer session not found: {proposer_session_id}")
+        return result
+
+    def get_trust_scores(self) -> dict:
+        return {"trust_scores": self._network.get_trust_scores()}
+
+    # ------------------------------------------------------------------
+    # Internal — drift event publication mirrors REST orchestration.
+
+    def _publish_drift_event(
+        self, session_id: str, drift_score: float, drift_phase: str
+    ) -> None:
+        cluster_id = self._clusters.get_cluster_for_session(session_id)
+        # A session IS a cluster's backing session when ``session_id == cluster_id``.
+        if cluster_id is None and self._clusters.get_cluster(session_id) is not None:
+            cluster_id = session_id
+        if cluster_id is None:
+            return
+        region_id = self._regions.get_region_for_cluster(cluster_id)
+        if region_id is None:
+            return
+        self._regions.publish_drift(cluster_id, region_id, drift_score, drift_phase)
