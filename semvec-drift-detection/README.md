@@ -162,9 +162,16 @@ uv pip install -e ".[dev]"     # or: pip install -e ".[dev]"
 cp .env.example .env
 $EDITOR .env                   # fill in NEO4J_TEST_PASSWORD + OPENAI_*
 
-# 4. Generate healthcare test data
-uvx create-context-graph healthcare-test-data --domain healthcare --framework pydanticai --demo-data
+# 4. Seed the healthcare graph in Neo4j (uses the fixtures bundled
+#    under healthcare-fixtures/ — same patients, providers, diagnoses
+#    and medications the demo scenarios reference by name).
+python scripts/seed_test_data.py
 ```
+
+> Want to regenerate the fixtures from scratch? Run
+> `uvx create-context-graph healthcare-test-data --domain healthcare
+> --framework pydanticai --demo-data` and point `FIXTURES_PATH` and
+> `HEALTHCARE_SCHEMA_PATH` in your `.env` at the new scaffold.
 
 ### Run the Demo
 
@@ -238,7 +245,10 @@ semvec-drift-detection/
     interactive_demo.py      # 7 scenarios showcasing Semvec × Neo4j
     seed_test_data.py        # Bulk seed healthcare + Semvec data
   schema/
-    semvec_schema.cypher        # Neo4j constraints + vector indexes
+    semvec_schema.cypher     # Neo4j constraints + vector indexes
+  healthcare-fixtures/       # Bundled healthcare graph (5 patients,
+                             # 5 providers, diagnoses, medications,
+                             # encounters) — pinned for reproducibility
   tests/                     # pytest suite — unit (offline) + integration (Neo4j)
   docs/
     API.md                   # API surface documentation

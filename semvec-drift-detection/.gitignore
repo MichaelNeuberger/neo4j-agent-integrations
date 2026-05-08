@@ -19,6 +19,9 @@ uv.lock
 # Environment
 .env
 
-# Generated data (re-create via create-context-graph)
+# Generated scaffolds from `uvx create-context-graph` (the demo reads the
+# bundled fixtures in healthcare-fixtures/ by default; both names below
+# refer to optional regenerated copies that should not be tracked).
 healthcare-test-data/
+pss-test-data/
 docs/plans/

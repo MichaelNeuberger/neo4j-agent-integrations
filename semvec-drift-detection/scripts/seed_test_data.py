@@ -46,12 +46,16 @@ NEO4J_USER = os.environ["NEO4J_TEST_USER"]
 NEO4J_PASSWORD = os.environ["NEO4J_TEST_PASSWORD"]
 NEO4J_DATABASE = os.environ["NEO4J_TEST_DATABASE"]
 
-FIXTURES_PATH = os.environ.get("FIXTURES_PATH") or "/tmp/healthcare-test-data/data/fixtures.json"
-SCHEMA_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(__file__)),
-    "schema", "semvec_schema.cypher",
-)
-HEALTHCARE_SCHEMA_PATH = "/tmp/healthcare-test-data/cypher/schema.cypher"
+# Default to the fixtures bundled with this repo so a fresh clone is
+# self-contained and produces the same patients/providers as the demo
+# scenarios reference by name. Override via .env to point elsewhere.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+_BUNDLED_FIXTURES = os.path.join(_PROJECT_ROOT, "healthcare-fixtures", "data", "fixtures.json")
+_BUNDLED_SCHEMA = os.path.join(_PROJECT_ROOT, "healthcare-fixtures", "cypher", "schema.cypher")
+
+FIXTURES_PATH = os.environ.get("FIXTURES_PATH") or _BUNDLED_FIXTURES
+HEALTHCARE_SCHEMA_PATH = os.environ.get("HEALTHCARE_SCHEMA_PATH") or _BUNDLED_SCHEMA
+SCHEMA_PATH = os.path.join(_PROJECT_ROOT, "schema", "semvec_schema.cypher")
 
 
 def load_fixtures(path: str) -> dict:
@@ -314,7 +318,17 @@ def main():
 
     if not os.path.exists(fixtures_path):
         print(f"Fixtures not found at {fixtures_path}")
-        print("Run: uvx create-context-graph healthcare-test-data --domain healthcare --framework pydanticai --demo-data")
+        print(
+            "Repo ships bundled fixtures at "
+            "semvec-drift-detection/healthcare-fixtures/data/fixtures.json — "
+            "if those are missing, restore them with `git checkout HEAD -- "
+            "semvec-drift-detection/healthcare-fixtures/`."
+        )
+        print(
+            "Or generate fresh fixtures via "
+            "`uvx create-context-graph healthcare-test-data --domain healthcare "
+            "--framework pydanticai --demo-data` and override FIXTURES_PATH in .env."
+        )
         sys.exit(1)
 
     driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
