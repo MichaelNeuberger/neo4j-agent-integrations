@@ -21,7 +21,7 @@ healthcare-fixtures/
 ## Reproducing the demo
 
 The demo entry point (`scripts/seed_test_data.py`) already points here by
-default. From `semvec-drift-detection/`:
+default. From the repo root:
 
 ```bash
 # 1. Apply the Semvec graph schema + load healthcare fixtures

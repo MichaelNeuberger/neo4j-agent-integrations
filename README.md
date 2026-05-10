@@ -147,7 +147,8 @@ RETURN s, inv, pat, diag, treat, med, drift, cluster
 ### Setup
 
 ```bash
-cd semvec-drift-detection
+git clone https://github.com/MichaelNeuberger/neo4j-agent-integrations.git
+cd neo4j-agent-integrations
 
 # 1. Create the Python environment
 python3 -m venv .venv
@@ -257,27 +258,30 @@ Bridge:       AgentSession → INVESTIGATED {step, drift_score, phase} → (any 
 ## Project Structure
 
 ```
-semvec-drift-detection/
+semvec_neo4j/                  # repo root (PyPI package: semvec_neo4j)
   src/
     core/
-      semvec_client.py       # In-process Semvec client (Layers 1-5)
-      embedder.py            # HashEmbedder (offline) + SentenceTransformerEmbedder
-      drift_detector.py      # Thin bridge: Semvec → Neo4j (no heuristics)
+      semvec_client.py         # In-process Semvec client (Layers 1-5)
+      embedder.py              # HashEmbedder (offline) + SentenceTransformerEmbedder
+      drift_detector.py        # Thin bridge: Semvec → Neo4j (no heuristics)
     mcp/
-      semvec_mcp_server.py      # MCP tools for agent frameworks
-    persistence/             # Neo4j stores (session, state, phase, drift, memory, cluster, region)
-    analytics/               # Similarity, influence, trajectories
+      semvec_mcp_server.py     # MCP tools for agent frameworks
+    persistence/               # Neo4j stores (session, state, phase, drift, memory, cluster, region)
+    analytics/                 # Similarity, influence, trajectories
   scripts/
-    interactive_demo.py      # 7 scenarios showcasing Semvec × Neo4j
-    seed_test_data.py        # Bulk seed healthcare + Semvec data
+    interactive_demo.py        # 7 scenarios showcasing Semvec × Neo4j
+    seed_test_data.py          # Bulk seed healthcare + Semvec data
+    demo_helpers.py            # Pure-Python render helpers (sim_bar, observer sample)
   schema/
-    semvec_schema.cypher     # Neo4j constraints + vector indexes
-  healthcare-fixtures/       # Bundled healthcare graph (5 patients,
-                             # 5 providers, diagnoses, medications,
-                             # encounters) — pinned for reproducibility
-  tests/                     # pytest suite — unit (offline) + integration (Neo4j)
+    semvec_schema.cypher       # Neo4j constraints + vector indexes
+  healthcare-fixtures/         # Bundled healthcare graph (5 patients,
+                               # 5 providers, diagnoses, medications,
+                               # encounters) — pinned for reproducibility
+  tests/                       # pytest suite — unit (offline) + integration (Neo4j)
   docs/
-    API.md                   # API surface documentation
+    API.md                     # Public API surface documentation
+    demo_queries.md            # Public Cypher / demo query reference
+    # docs/blog/, docs/plans/  → gitignored (drafts + internal notes)
 ```
 
 ---
