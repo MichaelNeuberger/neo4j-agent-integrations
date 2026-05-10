@@ -335,9 +335,9 @@ def main():
         print(f"Fixtures not found at {fixtures_path}")
         print(
             "Repo ships bundled fixtures at "
-            "semvec-drift-detection/healthcare-fixtures/data/fixtures.json — "
+            "healthcare-fixtures/data/fixtures.json — "
             "if those are missing, restore them with `git checkout HEAD -- "
-            "semvec-drift-detection/healthcare-fixtures/`."
+            "healthcare-fixtures/`."
         )
         print(
             "Or generate fresh fixtures via "

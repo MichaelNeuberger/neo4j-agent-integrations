@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "semvec-drift-detection"
+name = "semvec_neo4j"
 version = "0.2.0"
-description = "Semvec drift-detection integration for the Neo4j agent ecosystem"
+description = "Semvec × Neo4j integration — drift detection, multi-agent clusters, regions/observer, and the INVESTIGATED bridge into a healthcare knowledge graph"
 requires-python = ">=3.10"
 dependencies = [
     "semvec>=0.5",
